@@ -1,0 +1,20 @@
+# Test basic walnut-cli tracing functionality
+# REQUIRES: walnut-cli
+# RUN: %walnut-cli %{test_tx} --ethdebug-dir %{ethdebug_dir} --rpc %{rpc_url} 2>&1 | FileCheck %s
+
+# Check that we get the basic tracing output structure
+# CHECK: Loading transaction
+# CHECK: Contract: TestContract
+# CHECK: Function Call Trace:
+# CHECK: Gas used:
+
+# Check for the call stack header
+# CHECK: Call Stack:
+# CHECK: ------------------------------------------------------------
+
+# Check that we see at least the runtime dispatcher
+# CHECK: #0 TestContract::runtime_dispatcher
+
+# Check for the footer
+# CHECK: ------------------------------------------------------------
+# CHECK: Use --raw flag to see detailed instruction trace

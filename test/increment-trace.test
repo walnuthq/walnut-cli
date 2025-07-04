@@ -1,0 +1,17 @@
+# Test tracing of increment function call
+# REQUIRES: walnut-cli
+# First deploy the contract, then send an increment transaction, then trace it
+# RUN: cd %S/../examples && rm -rf debug && %S/../scripts/deploy-contract.sh --solc=%{solc_path} --rpc=%{rpc_url} TestContract TestContract.sol >/dev/null 2>&1 && TX=$(DEBUG_DIR=debug RPC_URL=%{rpc_url} %S/../scripts/interact-contract.sh send "increment(uint256)" 4 2>&1 | grep -o '0x[a-fA-F0-9]\{64\}' | head -1) && %walnut-cli $TX --ethdebug-dir %S/../examples/debug/ethdebug_output --rpc %{rpc_url} 2>&1 | FileCheck %s
+
+# Check for the specific function calls we expect
+# CHECK: Loading transaction
+# CHECK: Contract: TestContract
+
+# Check for the call hierarchy with increment function
+# CHECK: #0 TestContract::runtime_dispatcher
+# CHECK: #1 increment
+# CHECK: amount: 4
+
+# Check for nested function calls
+# CHECK: #2 increment2
+# CHECK: #3 increment3

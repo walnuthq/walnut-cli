@@ -1,0 +1,11 @@
+include README.md
+include LICENSE
+include requirements.txt
+include setup-walnut.sh
+include test-setup.sh
+recursive-include scripts *.sh
+recursive-include examples *.sol
+exclude walnut-cli.py
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude .DS_Store

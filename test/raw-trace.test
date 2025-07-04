@@ -1,0 +1,21 @@
+# Test raw instruction trace functionality
+# REQUIRES: walnut-cli
+# RUN: %walnut-cli %{test_tx} --ethdebug-dir %{ethdebug_dir} --rpc %{rpc_url} --raw 2>&1 | FileCheck %s
+
+# When using --raw flag, we should see individual EVM instructions
+# CHECK: Loading transaction
+# CHECK: Contract: TestContract
+
+# Check for execution trace header
+# CHECK: Execution trace
+
+# Check for the trace table header
+# CHECK: Step | PC
+# CHECK: Op
+# CHECK: Gas
+# CHECK: Stack
+
+# Check that we see at least some EVM opcodes
+# CHECK-DAG: PUSH1
+# CHECK-DAG: MSTORE
+# CHECK-DAG: CALLDATASIZE
