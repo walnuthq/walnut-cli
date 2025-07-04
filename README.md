@@ -1,6 +1,8 @@
 # Walnut EVM Debugger
 
-A transaction-based debugger for Solidity smart contracts supporting the standard ETHDebug format.
+A transaction-based debugger for Solidity smart contracts.
+
+<img width="1417" alt="internal-calls" src="https://github.com/user-attachments/assets/3f795fcd-6db0-4ad8-a9e0-3466b2f4a39c" />
 
 ## Installation
 
