@@ -19,7 +19,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from transaction_tracer import TransactionTracer, SourceMapper
+from walnut_cli.transaction_tracer import TransactionTracer, SourceMapper
 
 
 def find_debug_file(contract_addr: str) -> str:
@@ -132,7 +132,7 @@ def main():
     # Start interactive debugger if requested
     if args.interactive:
         print("\nStarting interactive debugger...")
-        from evm_repl import EVMDebugger
+        from walnut_cli.evm_repl import EVMDebugger
         
         debugger = EVMDebugger(
             contract_address=trace.to_addr,

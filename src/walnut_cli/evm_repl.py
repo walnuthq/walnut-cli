@@ -32,6 +32,18 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
         self.watch_expressions = []
         self.display_mode = "source"  # "source" or "asm"
         self.function_trace = []  # Function call trace
+        self.variable_history = {}  # variable_name -> list of (step, value, type, location)
+        
+        # Variable display filters
+        self.variable_filters = {
+            'show_types': set(),  # If empty, show all types
+            'hide_types': set(),  # Specific types to hide
+            'show_locations': set(),  # If empty, show all locations
+            'hide_locations': set(),  # Specific locations to hide
+            'name_pattern': None,  # Regex pattern for variable names
+            'hide_parameters': False,  # Hide function parameters
+            'hide_temporaries': True,  # Hide compiler-generated temporary variables
+        }
         
         # Load contract and debug info
         self.contract_address = contract_address
@@ -133,6 +145,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             
         self.current_step += 1
         self._update_current_function()
+        self._track_variable_changes()
         self._show_current_state()
     
     def do_ni(self, arg):
@@ -178,6 +191,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             if new_line is not None and new_line != current_line:
                 # Reached a new source line
                 self._update_current_function()
+                self._track_variable_changes()
                 self._show_current_state()
                 return
         
@@ -217,6 +231,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             # Check breakpoints
             if step.pc in self.breakpoints:
                 print(f"\n{warning('Breakpoint hit')} at PC {pc_value(step.pc)}")
+                self._track_variable_changes()
                 self._show_current_state()
                 return
             
@@ -227,6 +242,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
                 return
         
         print(info("Execution completed."))
+        self._track_variable_changes()
         self._show_current_state()
     
     def do_c(self, arg):
@@ -316,7 +332,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
         self.do_list(arg)
     
     def do_print(self, arg):
-        """Print value from stack/memory/storage. Usage: print stack[0], print storage[0x0]"""
+        """Print value from stack/memory/storage or variable. Usage: print <variable_name> or print stack[0]"""
         if not self.current_trace:
             print("No transaction loaded.")
             return
@@ -325,10 +341,29 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
         
         if not arg:
             print("Usage: print <expression>")
-            print("Examples: print stack[0], print storage[0x0], print memory[0x40:0x60]")
+            print("Examples: print amount, print stack[0], print storage[0x0], print memory[0x40:0x60]")
             return
         
         try:
+            # First try to resolve as a variable name from ETHDebug
+            if self.tracer.ethdebug_info:
+                var_result = self._evaluate_variable_watch(step, arg)
+                if var_result is not None:
+                    var_name = var_result['name']
+                    var_value = var_result['value']
+                    var_type = var_result['type']
+                    location = var_result['location']
+                    print(f"{var_name} = {var_value} ({var_type}) @ {location}")
+                    return
+                    
+            # Fall back to function parameters if ETHDebug doesn't have the variable
+            if self.current_function and self.current_function.args:
+                for param_name, param_value in self.current_function.args:
+                    if param_name == arg:
+                        print(f"{param_name} = {param_value} (function parameter)")
+                        return
+            
+            # Fall back to stack/memory/storage expressions
             if arg.startswith("stack[") and arg.endswith("]"):
                 index = int(arg[6:-1])
                 if 0 <= index < len(step.stack):
@@ -367,6 +402,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             
             else:
                 print(f"Unknown expression: {arg}")
+                print("Try: variable name, stack[index], storage[key], or memory[start:end]")
                 
         except Exception as e:
             print(f"Error evaluating expression: {e}")
@@ -480,7 +516,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
         self.do_where(arg)
     
     def do_watch(self, arg):
-        """Add watch expression. Usage: watch <expression>"""
+        """Add variable watch. Usage: watch <variable_name> or watch <expression>"""
         if not arg:
             # List watches
             if self.watch_expressions:
@@ -491,8 +527,286 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
                 print("No watch expressions.")
             return
         
+        # Support special commands
+        if arg.startswith('remove ') or arg.startswith('delete '):
+            try:
+                index = int(arg.split()[1])
+                if 0 <= index < len(self.watch_expressions):
+                    removed = self.watch_expressions.pop(index)
+                    print(f"Removed watch: {removed}")
+                else:
+                    print(f"Invalid watch index: {index}")
+            except (ValueError, IndexError):
+                print("Usage: watch remove <index>")
+            return
+        elif arg == 'clear':
+            self.watch_expressions.clear()
+            print("All watch expressions cleared.")
+            return
+        
         self.watch_expressions.append(arg)
         print(f"Watch expression added: {arg}")
+    
+    def do_history(self, arg):
+        """Show variable history. Usage: history [variable_name]"""
+        if not self.variable_history:
+            print("No variable history available.")
+            return
+        
+        if not arg:
+            # Show all variables with history
+            print("Variables with history:")
+            for var_name, history in self.variable_history.items():
+                print(f"  {info(var_name)}: {len(history)} changes")
+            print(f"\nUse {info('history <variable_name>')} to see details")
+            return
+        
+        var_name = arg.strip()
+        if var_name not in self.variable_history:
+            print(f"No history found for variable '{var_name}'")
+            return
+        
+        history = self.variable_history[var_name]
+        print(f"\n{bold(f'History for variable: {var_name}')}")
+        print(dim("-" * 60))
+        
+        for step, value, var_type, location in history:
+            # Format value for display
+            if isinstance(value, int) and value > 1000000:
+                value_str = f"{value} (0x{value:x})"
+            else:
+                value_str = str(value)
+            
+            print(f"Step {highlight(f'{step:4d}')}: {cyan(value_str)} ({dim(var_type)}) @ {dim(location)}")
+        
+        print(dim("-" * 60))
+        print(f"Total changes: {len(history)}")
+    
+    def do_vars(self, arg):
+        """Show all variables at current step. Usage: vars"""
+        if not self.current_trace:
+            print("No transaction loaded.")
+            return
+        
+        step = self.current_trace.steps[self.current_step]
+        
+        if not self.tracer.ethdebug_info:
+            print("No ETHDebug information available.")
+            return
+        
+        variables = self.tracer.ethdebug_info.get_variables_at_pc(step.pc)
+        
+        # If no ETHDebug variables, fall back to function parameters
+        if not variables:
+            if self.current_function and self.current_function.args:
+                print(f"{cyan('Function Parameters:')}")
+                for param_name, param_value in self.current_function.args:
+                    print(f"  {info(param_name)}: {cyan(str(param_value))} (function parameter)")
+            else:
+                print("No variables or parameters available at current step.")
+            return
+        
+        print(f"\n{bold('All Variables at Current Step:')}")
+        print(dim("-" * 50))
+        
+        # Separate parameters and locals
+        param_names = set()
+        if self.current_function and self.current_function.args:
+            param_names = {param[0] for param in self.current_function.args}
+        
+        params = []
+        locals_vars = []
+        
+        for var in variables:
+            if var.name in param_names:
+                params.append(var)
+            else:
+                locals_vars.append(var)
+        
+        # Show parameters
+        if params:
+            print(f"\n{cyan('Parameters:')}")
+            for var in params:
+                self._print_variable_info(var, step)
+        
+        # Show local variables
+        if locals_vars:
+            print(f"\n{cyan('Local Variables:')}")
+            for var in locals_vars:
+                self._print_variable_info(var, step)
+        
+        print(dim("-" * 50))
+    
+    def _print_variable_info(self, var, step):
+        """Helper to print variable information."""
+        try:
+            value = None
+            location_str = f"{var.location_type}[{var.offset}]"
+            
+            if var.location_type == "stack" and var.offset < len(step.stack):
+                raw_value = step.stack[var.offset]
+                value = self.tracer.decode_value(raw_value, var.type)
+            elif var.location_type == "memory" and step.memory:
+                value = self.tracer.extract_from_memory(step.memory, var.offset, var.type)
+            elif var.location_type == "storage" and step.storage:
+                value = self.tracer.extract_from_storage(step.storage, var.offset, var.type)
+            
+            if value is not None:
+                if isinstance(value, int) and value > 1000000:
+                    value_str = f"{value} (0x{value:x})"
+                else:
+                    value_str = str(value)
+                print(f"  {info(var.name)}: {cyan(value_str)} ({dim(var.type)}) @ {dim(location_str)}")
+            else:
+                print(f"  {info(var.name)}: {warning('?')} ({dim(var.type)}) @ {dim(location_str)}")
+        except Exception as e:
+            print(f"  {info(var.name)}: {error('error')} ({dim(var.type)}) @ {dim(location_str)}")
+    
+    def do_filter(self, arg):
+        """Configure variable display filters. Usage: filter <command> [args]"""
+        if not arg:
+            # Show current filter settings
+            print(f"\n{bold('Variable Display Filters:')}")
+            print(dim("-" * 40))
+            
+            filters = self.variable_filters
+            print(f"Hide parameters: {info(str(filters['hide_parameters']))}")
+            print(f"Hide temporaries: {info(str(filters['hide_temporaries']))}")
+            
+            if filters['show_types']:
+                print(f"Show only types: {info(', '.join(filters['show_types']))}")
+            if filters['hide_types']:
+                print(f"Hide types: {info(', '.join(filters['hide_types']))}")
+            
+            if filters['show_locations']:
+                print(f"Show only locations: {info(', '.join(filters['show_locations']))}")
+            if filters['hide_locations']:
+                print(f"Hide locations: {info(', '.join(filters['hide_locations']))}")
+            
+            if filters['name_pattern']:
+                print(f"Name pattern: {info(filters['name_pattern'])}")
+            
+            print(dim("-" * 40))
+            print(f"\nUsage: {info('filter <command> [args]')}")
+            print(f"Commands: show-params, hide-params, show-temps, hide-temps")
+            print(f"          show-type <type>, hide-type <type>, show-location <loc>, hide-location <loc>")
+            print(f"          name-pattern <regex>, clear-filters")
+            return
+        
+        parts = arg.split()
+        command = parts[0]
+        
+        if command == 'show-params':
+            self.variable_filters['hide_parameters'] = False
+            print("Now showing function parameters")
+        elif command == 'hide-params':
+            self.variable_filters['hide_parameters'] = True
+            print("Now hiding function parameters")
+        elif command == 'show-temps':
+            self.variable_filters['hide_temporaries'] = False
+            print("Now showing temporary variables")
+        elif command == 'hide-temps':
+            self.variable_filters['hide_temporaries'] = True
+            print("Now hiding temporary variables")
+        elif command == 'show-type' and len(parts) > 1:
+            var_type = parts[1]
+            self.variable_filters['show_types'].add(var_type)
+            self.variable_filters['hide_types'].discard(var_type)
+            print(f"Now showing only variables of type: {var_type}")
+        elif command == 'hide-type' and len(parts) > 1:
+            var_type = parts[1]
+            self.variable_filters['hide_types'].add(var_type)
+            self.variable_filters['show_types'].discard(var_type)
+            print(f"Now hiding variables of type: {var_type}")
+        elif command == 'show-location' and len(parts) > 1:
+            location = parts[1]
+            self.variable_filters['show_locations'].add(location)
+            self.variable_filters['hide_locations'].discard(location)
+            print(f"Now showing only variables in location: {location}")
+        elif command == 'hide-location' and len(parts) > 1:
+            location = parts[1]
+            self.variable_filters['hide_locations'].add(location)
+            self.variable_filters['show_locations'].discard(location)
+            print(f"Now hiding variables in location: {location}")
+        elif command == 'name-pattern' and len(parts) > 1:
+            pattern = ' '.join(parts[1:])
+            try:
+                import re
+                re.compile(pattern)  # Test if valid regex
+                self.variable_filters['name_pattern'] = pattern
+                print(f"Set name pattern filter: {pattern}")
+            except re.error as e:
+                print(f"Invalid regex pattern: {e}")
+        elif command == 'clear-filters':
+            self.variable_filters = {
+                'show_types': set(),
+                'hide_types': set(),
+                'show_locations': set(),
+                'hide_locations': set(),
+                'name_pattern': None,
+                'hide_parameters': False,
+                'hide_temporaries': True,
+            }
+            print("All filters cleared")
+        else:
+            print(f"Unknown filter command: {command}")
+            print("Use 'filter' without arguments to see usage help")
+    
+    def do_debug_ethdebug(self, arg):
+        """Debug ETHDebug data. Usage: debug_ethdebug [pc]"""
+        if not self.tracer.ethdebug_info:
+            print("No ETHDebug information available.")
+            return
+        
+        if arg:
+            # Check specific PC
+            try:
+                pc = int(arg, 0)  # Support hex with 0x prefix
+            except ValueError:
+                print("Invalid PC value")
+                return
+        else:
+            # Use current PC
+            if not self.current_trace:
+                print("No transaction loaded.")
+                return
+            pc = self.current_trace.steps[self.current_step].pc
+        
+        print(f"\n{bold(f'ETHDebug Information for PC {pc}:')}")
+        print(dim("-" * 50))
+        
+        # Check if we have an instruction at this PC
+        instruction = self.tracer.ethdebug_info.get_instruction_at_pc(pc)
+        if instruction:
+            print(f"Instruction: {instruction.mnemonic}")
+            if instruction.arguments:
+                print(f"Arguments: {', '.join(instruction.arguments)}")
+            
+            # Check source mapping
+            source_info = self.tracer.ethdebug_info.get_source_info(pc)
+            if source_info:
+                source_path, offset, length = source_info
+                line, col = self.tracer.ethdebug_parser.offset_to_line_col(source_path, offset)
+                print(f"Source: {source_path}:{line}:{col}")
+            else:
+                print("No source mapping")
+        else:
+            print("No instruction found at this PC")
+        
+        # Check variable information
+        variables = self.tracer.ethdebug_info.get_variables_at_pc(pc)
+        print(f"\nVariables: {len(variables)} found")
+        for var in variables:
+            print(f"  - {var.name}: {var.type} @ {var.location_type}[{var.offset}] (range: {var.pc_range})")
+        
+        # Check if we have variable information for nearby PCs
+        print(f"\nVariable info for nearby PCs:")
+        for check_pc in range(max(0, pc - 10), pc + 11):
+            nearby_vars = self.tracer.ethdebug_info.get_variables_at_pc(check_pc)
+            if nearby_vars:
+                print(f"  PC {check_pc}: {len(nearby_vars)} variables")
+        
+        print(dim("-" * 50))
     
     def do_exit(self, arg):
         """Exit the debugger"""
@@ -519,6 +833,10 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             self._show_current_state()
     
     def do_quit(self, arg):
+        """Alias for exit"""
+        return self.do_exit(arg)
+    
+    def do_q(self, arg):
         """Alias for exit"""
         return self.do_exit(arg)
     
@@ -557,6 +875,46 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             if func.entry_step <= self.current_step <= (func.exit_step or len(self.current_trace.steps)):
                 self.current_function = func
                 break
+    
+    def _track_variable_changes(self):
+        """Track changes in variable values for history."""
+        if not self.tracer.ethdebug_info or self.current_step >= len(self.current_trace.steps):
+            return
+        
+        step = self.current_trace.steps[self.current_step]
+        variables = self.tracer.ethdebug_info.get_variables_at_pc(step.pc)
+        
+        for var in variables:
+            try:
+                # Extract the current value
+                value = None
+                location_str = f"{var.location_type}[{var.offset}]"
+                
+                if var.location_type == "stack" and var.offset < len(step.stack):
+                    raw_value = step.stack[var.offset]
+                    value = self.tracer.decode_value(raw_value, var.type)
+                elif var.location_type == "memory" and step.memory:
+                    value = self.tracer.extract_from_memory(step.memory, var.offset, var.type)
+                elif var.location_type == "storage" and step.storage:
+                    value = self.tracer.extract_from_storage(step.storage, var.offset, var.type)
+                
+                # Initialize history for this variable if needed
+                if var.name not in self.variable_history:
+                    self.variable_history[var.name] = []
+                
+                # Check if value has changed from last recorded value
+                history = self.variable_history[var.name]
+                if not history or history[-1][1] != value:
+                    # Record the change
+                    history.append((self.current_step, value, var.type, location_str))
+                    
+                    # Limit history size to prevent memory issues
+                    if len(history) > 1000:
+                        history.pop(0)
+                        
+            except Exception:
+                # Ignore errors in tracking
+                pass
     
     def _show_current_state(self):
         """Display current execution state (source-oriented)."""
@@ -606,6 +964,9 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
                     for param_name, param_value in self.current_function.args:
                         print(f"  {info(param_name)}: {cyan(str(param_value))}")
             
+            # Show local variables if ETHDebug is available
+            self._show_local_variables(step)
+            
             # Minimal instruction info
             print(f"{dim('[')} {dim('Step')} {highlight(f'{self.current_step}')} | "
                   f"{dim('Gas:')} {gas_value(step.gas)} | "
@@ -632,10 +993,206 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             if source_file and source_content:
                 print(f"{dim('Source:')} {info(f'{source_file}:{source_line_num}')}")
                 print(f"  {dim('=>')} {source_line(source_content)}")
+            
+            # Show local variables in assembly mode too
+            self._show_local_variables(step)
         
         # Watch expressions
-        for expr in self.watch_expressions:
-            self.do_print(expr)
+        if self.watch_expressions:
+            self._evaluate_watch_expressions(step)
+    
+    def _show_local_variables(self, step):
+        """Display local variables at the current step."""
+        if not self.tracer.ethdebug_info:
+            return
+        
+        # Get variables at current PC
+        variables = self.tracer.ethdebug_info.get_variables_at_pc(step.pc)
+        if not variables:
+            return
+        
+        # Apply filters to variables
+        filtered_vars = []
+        param_names = set()
+        if self.current_function and self.current_function.args:
+            param_names = {param[0] for param in self.current_function.args}
+        
+        for var in variables:
+            # Apply filtering logic
+            if not self._should_show_variable(var, param_names):
+                continue
+            filtered_vars.append(var)
+        
+        if not filtered_vars:
+            return
+        
+        print(f"{dim('Local Variables:')}")
+        for var in filtered_vars:
+            try:
+                # Extract the variable value based on its location
+                value = None
+                location_str = f"{var.location_type}[{var.offset}]"
+                
+                if var.location_type == "stack" and var.offset < len(step.stack):
+                    raw_value = step.stack[var.offset]
+                    value = self.tracer.decode_value(raw_value, var.type)
+                elif var.location_type == "memory" and step.memory:
+                    value = self.tracer.extract_from_memory(step.memory, var.offset, var.type)
+                elif var.location_type == "storage" and step.storage:
+                    value = self.tracer.extract_from_storage(step.storage, var.offset, var.type)
+                
+                # Format the value for display
+                if value is not None:
+                    if isinstance(value, int) and value > 1000000:
+                        # Show large numbers in hex too
+                        value_str = f"{value} (0x{value:x})"
+                    else:
+                        value_str = str(value)
+                    print(f"  {info(var.name)}: {cyan(value_str)} ({dim(var.type)}) @ {dim(location_str)}")
+                else:
+                    print(f"  {info(var.name)}: {warning('?')} ({dim(var.type)}) @ {dim(location_str)}")
+                    
+            except Exception as e:
+                print(f"  {info(var.name)}: {error('error')} ({dim(var.type)}) @ {dim(location_str)}")
+    
+    def _should_show_variable(self, var, param_names):
+        """Check if a variable should be displayed based on current filters."""
+        import re
+        
+        # Check if it's a parameter and we're hiding parameters
+        if self.variable_filters['hide_parameters'] and var.name in param_names:
+            return False
+        
+        # Check if it's a temporary variable and we're hiding them
+        if self.variable_filters['hide_temporaries']:
+            # Common patterns for temporary variables
+            if (var.name.startswith('_') or 
+                var.name.startswith('tmp') or 
+                var.name.startswith('temp') or
+                var.name.isdigit() or
+                var.name in ['$', '$$']):
+                return False
+        
+        # Check type filters
+        if self.variable_filters['show_types']:
+            # If show_types is specified, only show those types
+            if var.type not in self.variable_filters['show_types']:
+                return False
+        
+        if var.type in self.variable_filters['hide_types']:
+            return False
+        
+        # Check location filters
+        if self.variable_filters['show_locations']:
+            # If show_locations is specified, only show those locations
+            if var.location_type not in self.variable_filters['show_locations']:
+                return False
+        
+        if var.location_type in self.variable_filters['hide_locations']:
+            return False
+        
+        # Check name pattern
+        if self.variable_filters['name_pattern']:
+            try:
+                if not re.match(self.variable_filters['name_pattern'], var.name):
+                    return False
+            except re.error:
+                # Invalid regex, ignore pattern filter
+                pass
+        
+        return True
+    
+    def _evaluate_watch_expressions(self, step):
+        """Evaluate and display watch expressions."""
+        print(f"{dim('Watch Expressions:')}")
+        
+        for i, expr in enumerate(self.watch_expressions):
+            try:
+                # Check if it's a variable name first
+                value = self._evaluate_variable_watch(step, expr)
+                
+                if value is not None:
+                    # Successfully found as a variable
+                    if isinstance(value, dict):
+                        var_name = value['name']
+                        var_value = value['value']
+                        var_type = value['type']
+                        location = value['location']
+                        print(f"  [{i}] {info(var_name)}: {cyan(str(var_value))} ({dim(var_type)}) @ {dim(location)}")
+                    else:
+                        print(f"  [{i}] {info(expr)}: {cyan(str(value))}")
+                else:
+                    # Fall back to expression evaluation (stack/memory/storage)
+                    self._print_watch_expression(i, expr, step)
+                    
+            except Exception as e:
+                print(f"  [{i}] {info(expr)}: {error(f'Error: {e}')}")
+    
+    def _evaluate_variable_watch(self, step, var_name):
+        """Try to evaluate a watch expression as a variable name."""
+        if not self.tracer.ethdebug_info:
+            return None
+            
+        # Get all variables at current PC
+        variables = self.tracer.ethdebug_info.get_variables_at_pc(step.pc)
+        
+        for var in variables:
+            if var.name == var_name:
+                try:
+                    value = None
+                    location_str = f"{var.location_type}[{var.offset}]"
+                    
+                    if var.location_type == "stack" and var.offset < len(step.stack):
+                        raw_value = step.stack[var.offset]
+                        value = self.tracer.decode_value(raw_value, var.type)
+                    elif var.location_type == "memory" and step.memory:
+                        value = self.tracer.extract_from_memory(step.memory, var.offset, var.type)
+                    elif var.location_type == "storage" and step.storage:
+                        value = self.tracer.extract_from_storage(step.storage, var.offset, var.type)
+                    
+                    return {
+                        'name': var.name,
+                        'value': value,
+                        'type': var.type,
+                        'location': location_str
+                    }
+                except Exception:
+                    pass
+        
+        return None
+    
+    def _print_watch_expression(self, index, expr, step):
+        """Print a watch expression that's not a simple variable name."""
+        # This handles the existing stack[]/memory[]/storage[] syntax
+        if expr.startswith("stack[") and expr.endswith("]"):
+            try:
+                stack_index = int(expr[6:-1])
+                if 0 <= stack_index < len(step.stack):
+                    value = step.stack[stack_index]
+                    print(f"  [{index}] {info(expr)}: {cyan(value)}")
+                else:
+                    print(f"  [{index}] {info(expr)}: {warning('out of range')}")
+            except ValueError:
+                print(f"  [{index}] {info(expr)}: {error('invalid index')}")
+        elif expr.startswith("storage[") and expr.endswith("]"):
+            try:
+                key = expr[8:-1]
+                if key.startswith("0x"):
+                    key = key[2:]
+                if step.storage and key in step.storage:
+                    value = step.storage[key]
+                    print(f"  [{index}] {info(expr)}: {cyan(f'0x{value}')}")
+                else:
+                    print(f"  [{index}] {info(expr)}: {cyan('0x0')} {dim('(not set)')}")
+            except Exception:
+                print(f"  [{index}] {info(expr)}: {error('invalid storage key')}")
+        else:
+            # Try to evaluate as a general expression
+            try:
+                # This could be extended to support more complex expressions
+                print(f"  [{index}] {info(expr)}: {warning('unsupported expression')}")
+            except Exception as e:
+                print(f"  [{index}] {info(expr)}: {error(str(e))}")
     
     def _format_stack_colored(self, step) -> str:
         """Format stack with colors."""
@@ -688,7 +1245,8 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             # Information Display
             print(f"\n{cyan('Information Display:')}")
             print(f"  {info('list')} (l)          - Show source code")
-            print(f"  {info('print')} (p) <expr>  - Print value (stack[0], storage[0x0])")
+            print(f"  {info('print')} (p) <expr>  - Print variable or expression")
+            print(f"  {info('vars')}              - Show all variables at current step")
             print(f"  {info('info')} <what>       - Show info (registers/stack/memory/storage/gas)")
             print(f"  {info('where')} (bt)        - Show call stack")
             print(f"  {info('disasm')}            - Show disassembly")
@@ -696,12 +1254,21 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             # Display Settings
             print(f"\n{cyan('Display Settings:')}")
             print(f"  {info('mode')} <source|asm> - Switch display mode")
-            print(f"  {info('watch')} <expr>      - Add watch expression")
+            print(f"  {info('watch')} <expr>      - Add/manage watch expressions")
+            print(f"  {info('filter')} <cmd>      - Configure variable display filters")
+            
+            # Variable Analysis
+            print(f"\n{cyan('Variable Analysis:')}")
+            print(f"  {info('history')} [var]     - Show variable change history")
+            
+            # Debug Commands
+            print(f"\n{cyan('Debug Commands:')}")
+            print(f"  {info('debug_ethdebug')}    - Debug ETHDebug data at current PC")
             
             # Other
             print(f"\n{cyan('Other Commands:')}")
             print(f"  {info('help')} [command]    - Show help")
-            print(f"  {info('exit')} (quit)       - Exit debugger")
+            print(f"  {info('exit')} (quit/q)    - Exit debugger")
             
             print(f"\n{dim('Use')} {info('help <command>')} {dim('for detailed help on a specific command.')}")
             print(dim("=" * 60) + "\n")

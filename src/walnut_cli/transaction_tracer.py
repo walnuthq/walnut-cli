@@ -468,6 +468,171 @@ class TransactionTracer:
         
         return pattern_info
     
+    def find_parameter_value_from_ethdebug(self, trace: TransactionTrace, 
+                                          function_step: int, 
+                                          param_name: str, 
+                                          param_type: str) -> Optional[Any]:
+        """Find parameter value using ETHDebug location information.
+        
+        This method uses precise variable location information from ETHDebug
+        to find parameter values without relying on heuristics.
+        
+        Args:
+            trace: The transaction trace containing execution steps
+            function_step: The step index where the function is called
+            param_name: The name of the parameter to find
+            param_type: The Solidity type of the parameter
+            
+        Returns:
+            The decoded parameter value, or None if not found
+        """
+        if not self.ethdebug_info:
+            # ETHDebug not available - this is expected in many cases
+            return None
+            
+        if function_step >= len(trace.steps):
+            print(f"Warning: Function step {function_step} out of range (trace has {len(trace.steps)} steps)")
+            return None
+            
+        step = trace.steps[function_step]
+        pc = step.pc
+        
+        # Debug logging
+        if hasattr(self, 'debug_mode') and self.debug_mode:
+            print(f"[ETHDebug] Looking for parameter '{param_name}' at PC {pc}")
+        
+        # Get variable locations at this PC
+        try:
+            var_locations = self.ethdebug_info.get_variables_at_pc(pc)
+            
+            if hasattr(self, 'debug_mode') and self.debug_mode:
+                print(f"[ETHDebug] Found {len(var_locations)} variables at PC {pc}")
+                for var in var_locations:
+                    print(f"[ETHDebug]   - {var.name}: {var.location_type}[{var.offset}]")
+        except Exception as e:
+            print(f"Error getting variable locations at PC {pc}: {e}")
+            return None
+        
+        # Search for the parameter in variable locations
+        for var_loc in var_locations:
+            if var_loc.name == param_name:
+                try:
+                    if var_loc.location_type == "stack":
+                        # Precise stack location
+                        if var_loc.offset < len(step.stack):
+                            value = self.decode_value(step.stack[var_loc.offset], param_type)
+                            if hasattr(self, 'debug_mode') and self.debug_mode:
+                                print(f"[ETHDebug] Found {param_name} on stack[{var_loc.offset}] = {value}")
+                            return value
+                        else:
+                            print(f"Warning: Stack offset {var_loc.offset} out of range (stack size: {len(step.stack)})")
+                    elif var_loc.location_type == "memory":
+                        # Extract from memory
+                        value = self.extract_from_memory(step.memory, var_loc.offset, param_type)
+                        if value is not None and hasattr(self, 'debug_mode') and self.debug_mode:
+                            print(f"[ETHDebug] Found {param_name} in memory[{var_loc.offset}] = {value}")
+                        return value
+                    elif var_loc.location_type == "storage":
+                        # Extract from storage
+                        value = self.extract_from_storage(step.storage, var_loc.offset, param_type)
+                        if value is not None and hasattr(self, 'debug_mode') and self.debug_mode:
+                            print(f"[ETHDebug] Found {param_name} in storage[{var_loc.offset}] = {value}")
+                        return value
+                    else:
+                        print(f"Warning: Unknown location type '{var_loc.location_type}' for {param_name}")
+                except Exception as e:
+                    print(f"Error extracting {param_name} from {var_loc.location_type}: {e}")
+                    continue
+        
+        # Parameter not found in ETHDebug data
+        if hasattr(self, 'debug_mode') and self.debug_mode:
+            print(f"[ETHDebug] Parameter '{param_name}' not found in ETHDebug data at PC {pc}")
+        
+        return None
+    
+    def decode_value(self, raw_value: str, param_type: str) -> Any:
+        """Decode a raw hex value based on its type."""
+        try:
+            if param_type == 'uint256' or param_type.startswith('uint'):
+                return int(raw_value, 16)
+            elif param_type == 'int256' or param_type.startswith('int'):
+                # Handle signed integers
+                value = int(raw_value, 16)
+                # Check if it's a negative number (most significant bit set)
+                bits = int(param_type[3:]) if param_type.startswith('int') else 256
+                if value >= 2**(bits-1):
+                    value -= 2**bits
+                return value
+            elif param_type == 'address':
+                # Ensure proper address formatting
+                return to_checksum_address('0x' + raw_value[-40:])
+            elif param_type == 'bool':
+                return int(raw_value, 16) != 0
+            elif param_type == 'bytes32' or param_type.startswith('bytes'):
+                return '0x' + raw_value
+            elif param_type == 'string':
+                # For strings, we'd need to decode from memory
+                return f"<string at 0x{raw_value}>"
+            else:
+                # For complex types, return hex representation
+                return '0x' + raw_value
+        except Exception as e:
+            print(f"Warning: Failed to decode {param_type} value: {e}")
+            return '0x' + raw_value
+    
+    def extract_from_memory(self, memory: str, offset: int, param_type: str) -> Optional[Any]:
+        """Extract and decode a value from memory."""
+        try:
+            # Memory is a hex string, each byte is 2 hex chars
+            byte_offset = offset
+            
+            if param_type == 'string':
+                # Strings in memory: first 32 bytes = length, then data
+                length_hex = memory[byte_offset*2:(byte_offset+32)*2]
+                if length_hex:
+                    length = int(length_hex, 16)
+                    data_hex = memory[(byte_offset+32)*2:(byte_offset+32+length)*2]
+                    return bytes.fromhex(data_hex).decode('utf-8', errors='replace')
+            elif param_type.startswith('bytes'):
+                if param_type == 'bytes' or param_type == 'bytes[]':
+                    # Dynamic bytes: first 32 bytes = length, then data
+                    length_hex = memory[byte_offset*2:(byte_offset+32)*2]
+                    if length_hex:
+                        length = int(length_hex, 16)
+                        data_hex = memory[(byte_offset+32)*2:(byte_offset+32+length)*2]
+                        return '0x' + data_hex
+                else:
+                    # Fixed-size bytes (e.g., bytes32)
+                    size = int(param_type[5:]) if len(param_type) > 5 else 32
+                    data_hex = memory[byte_offset*2:(byte_offset+size)*2]
+                    return '0x' + data_hex
+            else:
+                # For other types, read 32 bytes and decode
+                data_hex = memory[byte_offset*2:(byte_offset+32)*2]
+                if data_hex:
+                    return self.decode_value(data_hex, param_type)
+        except Exception as e:
+            print(f"Warning: Failed to extract from memory: {e}")
+        
+        return None
+    
+    def extract_from_storage(self, storage: Dict[str, str], slot: int, param_type: str) -> Optional[Any]:
+        """Extract and decode a value from storage."""
+        try:
+            # Storage keys are hex strings
+            slot_hex = hex(slot)
+            if slot_hex in storage:
+                return self.decode_value(storage[slot_hex], param_type)
+            
+            # Try without 0x prefix
+            slot_str = str(slot)
+            if slot_str in storage:
+                return self.decode_value(storage[slot_str], param_type)
+        except Exception as e:
+            print(f"Warning: Failed to extract from storage: {e}")
+        
+        return None
+    
     def find_parameter_value_on_stack(self, trace: TransactionTrace, function_step: int, 
                                       param_index: int, param_type: str, func_name: str = None) -> Optional[Any]:
         """Try to find parameter value by analyzing the stack and calling patterns.
@@ -547,8 +712,164 @@ class TransactionTracer:
         
         return None
     
+    def identify_function_boundaries_from_ethdebug(self, trace: TransactionTrace) -> Dict[int, Dict[str, Any]]:
+        """Use ETHDebug scope information to identify function boundaries.
+        
+        Returns:
+            Dict mapping PC to function info (name, start_pc, end_pc, params)
+        """
+        function_boundaries = {}
+        
+        if not self.ethdebug_info:
+            return function_boundaries
+        
+        # Track functions we've already found to avoid duplicates
+        found_functions = set()
+        
+        # Analyze ETHDebug instructions to find function boundaries
+        for instruction in self.ethdebug_info.instructions:
+            pc = instruction.offset
+            
+            # Check if this instruction has function scope information
+            if instruction.context:
+                context = self.ethdebug_parser.get_source_context(pc, context_lines=5)
+                if context:
+                    # Check if this line actually contains the function signature
+                    current_line_content = context.get('content', '').strip()
+                    
+                    # Only process if the current line contains a function declaration
+                    # and we haven't already found this function
+                    patterns = [
+                        (r'function\s+(\w+)\s*\((.*?)\)', 'function'),
+                        (r'constructor\s*\((.*?)\)', 'constructor'),
+                        (r'receive\s*\(\s*\)', 'receive'),
+                        (r'fallback\s*\((.*?)\)', 'fallback')
+                    ]
+                    
+                    for pattern, pattern_type in patterns:
+                        match = re.search(pattern, current_line_content)
+                        if match:
+                            if pattern_type == 'constructor':
+                                func_name = 'constructor'
+                                params = match.group(1) if match.lastindex >= 1 else ''
+                            elif pattern_type == 'receive':
+                                func_name = 'receive'
+                                params = ''
+                            elif pattern_type == 'fallback':
+                                func_name = 'fallback'
+                                params = match.group(1) if match.lastindex >= 1 else ''
+                            else:
+                                func_name = match.group(1)
+                                params = match.group(2) if match.lastindex >= 2 else ''
+                            
+                            # Skip if we've already found this function
+                            if func_name in found_functions:
+                                continue
+                            
+                            found_functions.add(func_name)
+                            
+                            # Parse parameters
+                            param_list = []
+                            if params:
+                                for param in params.split(','):
+                                    param = param.strip()
+                                    if param:
+                                        parts = param.split()
+                                        if len(parts) >= 2:
+                                            param_list.append({
+                                                'type': parts[0],
+                                                'name': parts[1] if len(parts) > 1 else f'param{len(param_list)}'
+                                            })
+                            
+                            function_boundaries[pc] = {
+                                'name': func_name,
+                                'start_pc': pc,
+                                'end_pc': None,  # Will be determined later
+                                'params': param_list,
+                                'source_line': context['line']
+                            }
+                            break
+        
+        return function_boundaries
+    
+    def detect_call_type(self, trace: TransactionTrace, step_index: int) -> str:
+        """Detect the type of call being made at a given step.
+        
+        Returns:
+            One of: "internal", "CALL", "DELEGATECALL", "STATICCALL", "CREATE", "CREATE2"
+        """
+        if step_index >= len(trace.steps):
+            return "internal"
+        
+        step = trace.steps[step_index]
+        
+        # Check the current operation
+        if step.op in ["CALL", "DELEGATECALL", "STATICCALL", "CREATE", "CREATE2"]:
+            return step.op
+        
+        # Look back a few steps to see if we're in the context of an external call
+        look_back = min(step_index, 10)
+        for i in range(step_index - look_back, step_index):
+            if i >= 0 and i < len(trace.steps):
+                prev_step = trace.steps[i]
+                if prev_step.op in ["CALL", "DELEGATECALL", "STATICCALL"]:
+                    # We're likely in the context of an external call
+                    return prev_step.op
+        
+        # Default to internal if no external call pattern found
+        return "internal"
+    
+    def extract_return_value(self, trace: TransactionTrace, exit_step: int, function_name: str) -> Optional[Any]:
+        """Extract return value from a function exit.
+        
+        Args:
+            trace: The transaction trace
+            exit_step: The step where the function exits
+            function_name: Name of the function for type lookup
+            
+        Returns:
+            The decoded return value, or None if not found
+        """
+        if exit_step >= len(trace.steps):
+            return None
+        
+        step = trace.steps[exit_step]
+        
+        # For RETURN opcode, the return data is specified by stack[0] (offset) and stack[1] (length)
+        if step.op == "RETURN" and len(step.stack) >= 2:
+            try:
+                offset = int(step.stack[0], 16)
+                length = int(step.stack[1], 16)
+                
+                if length > 0 and step.memory:
+                    # Extract return data from memory
+                    return_data = step.memory[offset*2:(offset+length)*2]
+                    
+                    # Try to decode based on function return type
+                    if function_name in self.function_abis:
+                        abi = self.function_abis[function_name]
+                        outputs = abi.get('outputs', [])
+                        if outputs and len(outputs) == 1:
+                            output_type = outputs[0].get('type', 'bytes')
+                            return self.decode_value(return_data, output_type)
+                    
+                    # Return raw hex if we can't decode
+                    return '0x' + return_data
+            except Exception as e:
+                print(f"Warning: Failed to extract return value: {e}")
+        
+        # For STOP or REVERT, there's typically no return value
+        return None
+    
     def analyze_function_calls(self, trace: TransactionTrace) -> List[FunctionCall]:
-        """Analyze trace to extract function calls including internal calls."""
+        """Analyze trace to extract function calls including internal calls.
+        
+        Enhanced with ETHDebug support for:
+        - Accurate function boundary detection
+        - Proper handling of different call types
+        - Return value tracking
+        - Improved internal function detection
+        """
         function_calls = []
         call_stack = []  # Track active function calls
         
@@ -568,8 +889,17 @@ class TransactionTracer:
         jump_stack_values = {}  # Track stack values at JUMP instructions
         stack_snapshots = {}  # PC -> stack snapshot for function entries
         
-        # First pass: identify all function entry points using source mappings
+        # Use ETHDebug to identify function boundaries if available
+        ethdebug_boundaries = {}
         if self.ethdebug_info:
+            ethdebug_boundaries = self.identify_function_boundaries_from_ethdebug(trace)
+            # Merge ETHDebug boundaries into function_pcs
+            for pc, func_info in ethdebug_boundaries.items():
+                function_pcs[pc] = func_info['name']
+        
+        # First pass: identify all function entry points using source mappings
+        if self.ethdebug_info and not ethdebug_boundaries:
+            # Fallback to the original method if ETHDebug boundaries weren't found
             for i, step in enumerate(trace.steps):
                 if step.op == "JUMPDEST":
                     context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
@@ -583,7 +913,51 @@ class TransactionTracer:
         
         # Second pass: track execution flow and build call stack
         current_depth = 0
+        external_call_depth = 0  # Track depth changes from external calls
+        
         for i, step in enumerate(trace.steps):
+            # Handle external calls (CALL, DELEGATECALL, STATICCALL)
+            if step.op in ["CALL", "DELEGATECALL", "STATICCALL"]:
+                # Extract call parameters from stack
+                if len(step.stack) >= 7:  # CALL requires 7 stack items
+                    gas = int(step.stack[0], 16)
+                    to_addr = '0x' + step.stack[1][-40:]  # Extract address (last 20 bytes)
+                    value = int(step.stack[2], 16) if step.op == "CALL" else 0
+                    
+                    # Create external call entry
+                    external_call = FunctionCall(
+                        name=f"{step.op.lower()}_to_{to_addr[:10]}",
+                        selector="",
+                        entry_step=i,
+                        exit_step=None,
+                        gas_used=0,
+                        depth=len(call_stack),
+                        args=[("to", to_addr), ("value", value), ("gas", gas)],
+                        source_line=None,
+                        stack_at_entry=step.stack.copy() if step.stack else [],
+                        call_type=step.op
+                    )
+                    call_stack.append(external_call)
+                    function_calls.append(external_call)
+                    external_call_depth += 1
+            
+            # Check for external call returns (depth decrease)
+            if i > 0 and step.depth < trace.steps[i-1].depth:
+                # External call has returned
+                if call_stack and external_call_depth > 0:
+                    # Find the most recent external call
+                    for j in range(len(call_stack) - 1, -1, -1):
+                        if call_stack[j].call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
+                            call = call_stack.pop(j)
+                            call.exit_step = i
+                            call.gas_used = trace.steps[call.entry_step].gas - step.gas
+                            # Check if there's a return value
+                            if i < len(trace.steps) - 1 and trace.steps[i+1].stack:
+                                # Return value is pushed to stack after external call
+                                call.return_value = int(trace.steps[i+1].stack[0], 16) if trace.steps[i+1].stack else None
+                            external_call_depth -= 1
+                            break
+            
             # Track JUMP targets and stack values
             if step.op == "JUMP" and step.stack:
                 jump_target = int(step.stack[0], 16)
@@ -621,59 +995,91 @@ class TransactionTracer:
                                     break
                     
                     if func_name:
-                        # This is a function entry
-                        source_line = None
-                        if self.ethdebug_info:
-                            context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
-                            if context:
-                                source_line = context['line']
+                        # Only create a new function entry if:
+                        # 1. We jumped here (not just a JUMPDEST in sequence), OR
+                        # 2. This PC is explicitly marked as a function entry in function_pcs
+                        # AND we're not already in a function with the same name at a nearby location
                         
-                        # Try to get parameters from current stack state
-                        args = []
-                        current_stack = step.stack if step.stack else []
+                        should_create_entry = False
                         
-                        if func_name in self.function_params:
-                            params_info = self.function_params[func_name]
+                        # Check if this is a real function entry (either jumped to or marked in function_pcs)
+                        if jumped_from is not None or step.pc in function_pcs:
+                            # Check if we're already inside this function
+                            already_in_function = False
+                            for existing_call in call_stack:
+                                if existing_call.name == func_name and existing_call.exit_step is None:
+                                    # For the same function, check if we're in a loop/internal jump
+                                    # by seeing if the PC is close to the existing entry
+                                    if step.pc > existing_call.entry_step:
+                                        # We're after the function entry, likely still in the same function
+                                        already_in_function = True
+                                        break
                             
-                            # For internal calls, try to find parameters by looking backwards
-                            for idx, param_info in enumerate(params_info):
-                                param_name = param_info.get('name', f'param{idx}')
-                                param_type = param_info.get('type', 'unknown')
-                                
-                                # First try our backwards search method
-                                param_value = self.find_parameter_value_on_stack(trace, i, idx, param_type, func_name)
-                                
-                                if param_value is not None:
-                                    args.append((param_name, param_value))
-                                else:
-                                    # Fallback: try current stack or jump stack values
-                                    if idx < len(current_stack):
-                                        try:
-                                            stack_value = current_stack[idx]
-                                            if param_type == 'uint256':
-                                                param_value = int(stack_value, 16)
-                                                args.append((param_name, param_value))
-                                            else:
-                                                args.append((param_name, f'0x{stack_value}'))
-                                        except:
-                                            args.append((param_name, '[passed via stack]'))
-                                    else:
-                                        args.append((param_name, '[passed via stack]'))
+                            should_create_entry = not already_in_function
                         
-                        call = FunctionCall(
-                            name=func_name,
-                            selector="",  # Internal calls don't have selectors
-                            entry_step=i,
-                            exit_step=None,  # Will be filled later
-                            gas_used=0,  # Will be calculated later
-                            depth=len(call_stack),
-                            args=args,
-                            source_line=source_line,
-                            stack_at_entry=current_stack.copy(),
-                            call_type="internal"  # Internal function call
-                        )
-                        call_stack.append(call)
-                        function_calls.append(call)
+                        if should_create_entry:
+                            # This is a function entry
+                            source_line = None
+                            if self.ethdebug_info:
+                                context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
+                                if context:
+                                    source_line = context['line']
+                            
+                            # Try to get parameters from current stack state
+                            args = []
+                            current_stack = step.stack if step.stack else []
+                            
+                            if func_name in self.function_params:
+                                params_info = self.function_params[func_name]
+                                
+                                # For internal calls, try to find parameters by looking backwards
+                                for idx, param_info in enumerate(params_info):
+                                    param_name = param_info.get('name', f'param{idx}')
+                                    param_type = param_info.get('type', 'unknown')
+                                    
+                                    # First try ETHDebug if available
+                                    param_value = None
+                                    if self.ethdebug_info:
+                                        param_value = self.find_parameter_value_from_ethdebug(trace, i, param_name, param_type)
+                                    
+                                    # Fallback to heuristics if ETHDebug didn't work
+                                    if param_value is None:
+                                        param_value = self.find_parameter_value_on_stack(trace, i, idx, param_type, func_name)
+                                    
+                                    if param_value is not None:
+                                        args.append((param_name, param_value))
+                                    else:
+                                        # Fallback: try current stack or jump stack values
+                                        if idx < len(current_stack):
+                                            try:
+                                                stack_value = current_stack[idx]
+                                                if param_type == 'uint256':
+                                                    param_value = int(stack_value, 16)
+                                                    args.append((param_name, param_value))
+                                                else:
+                                                    args.append((param_name, f'0x{stack_value}'))
+                                            except:
+                                                args.append((param_name, '[passed via stack]'))
+                                        else:
+                                            args.append((param_name, '[passed via stack]'))
+                            
+                            # Detect the call type using ETHDebug-enhanced method
+                            call_type = self.detect_call_type(trace, i)
+                            
+                            call = FunctionCall(
+                                name=func_name,
+                                selector="",  # Internal calls don't have selectors
+                                entry_step=i,
+                                exit_step=None,  # Will be filled later
+                                gas_used=0,  # Will be calculated later
+                                depth=len(call_stack),
+                                args=args,
+                                source_line=source_line,
+                                stack_at_entry=current_stack.copy(),
+                                call_type=call_type  # Use detected call type
+                            )
+                            call_stack.append(call)
+                            function_calls.append(call)
             
             # Detect function exits (JUMP back or STOP/RETURN)
             if call_stack and (step.op in ["STOP", "RETURN", "REVERT"] or 
@@ -686,6 +1092,10 @@ class TransactionTracer:
                         call = call_stack.pop()
                         call.exit_step = i
                         call.gas_used = trace.steps[call.entry_step].gas - step.gas
+                        
+                        # Try to extract return value if RETURN opcode
+                        if step.op == "RETURN":
+                            call.return_value = self.extract_return_value(trace, i, call.name)
         
         # Close any remaining open calls
         for call in call_stack:

@@ -31,9 +31,12 @@ get_debug_command() {
         abs_debug_dir="$(pwd)/$DEBUG_DIR"
     fi
     
-    # Check if ethdebug format is available
+    # Check if ethdebug format is available in subdirectory
     if [ -d "$abs_debug_dir/ethdebug_output" ] && [ -f "$abs_debug_dir/ethdebug_output/ethdebug.json" ]; then
         echo "$WALNUT_DIR/walnut-cli.py $tx_hash --ethdebug-dir $abs_debug_dir/ethdebug_output --rpc $RPC_URL"
+    # Check if ethdebug format is available directly in debug dir
+    elif [ -f "$abs_debug_dir/ethdebug.json" ]; then
+        echo "$WALNUT_DIR/walnut-cli.py $tx_hash --ethdebug-dir $abs_debug_dir --rpc $RPC_URL"
     # Check if DWARF/zasm format is available
     elif ls "$abs_debug_dir"/*.runtime.zasm >/dev/null 2>&1; then
         local zasm_file=$(ls "$abs_debug_dir"/*.runtime.zasm | head -1)
@@ -52,13 +55,18 @@ YELLOW='\033[0;33m'
 NC='\033[0m'
 
 # Load deployment info
-if [ ! -f "$DEBUG_DIR/deployment.json" ]; then
+# Check both old and new locations
+if [ -f "$DEBUG_DIR/ethdebug_output/deployment.json" ]; then
+    DEPLOYMENT_JSON="$DEBUG_DIR/ethdebug_output/deployment.json"
+elif [ -f "$DEBUG_DIR/deployment.json" ]; then
+    DEPLOYMENT_JSON="$DEBUG_DIR/deployment.json"
+else
     echo -e "${RED}No deployment found. Run deploy-contract.sh first.${NC}"
     exit 1
 fi
 
-CONTRACT_ADDR=$(jq -r '.address' "$DEBUG_DIR/deployment.json")
-CONTRACT_NAME=$(jq -r '.contract' "$DEBUG_DIR/deployment.json")
+CONTRACT_ADDR=$(jq -r '.address' "$DEPLOYMENT_JSON")
+CONTRACT_NAME=$(jq -r '.contract' "$DEPLOYMENT_JSON")
 
 echo -e "${BLUE}${CONTRACT_NAME} contract at: ${CONTRACT_ADDR}${NC}"
 

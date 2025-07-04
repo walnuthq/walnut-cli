@@ -34,20 +34,57 @@ NC='\033[0m'
 echo -e "${GREEN}=== Walnut CLI Test Suite ===${NC}"
 
 # Check if test deployment exists
-if [ ! -f "${PROJECT_DIR}/examples/debug/deployment.json" ]; then
-    echo -e "${YELLOW}No deployment found. Please deploy TestContract first.${NC}"
-    echo "Run: ${PROJECT_DIR}/scripts/deploy-contract.sh TestContract TestContract.sol"
-    exit 1
+# First check the new ETHDebug location
+if [ -f "${PROJECT_DIR}/examples/debug/ethdebug_output/deployment.json" ]; then
+    DEPLOYMENT_JSON="${PROJECT_DIR}/examples/debug/ethdebug_output/deployment.json"
+elif [ -f "${PROJECT_DIR}/examples/debug/deployment.json" ]; then
+    DEPLOYMENT_JSON="${PROJECT_DIR}/examples/debug/deployment.json"
+else
+    echo -e "${YELLOW}No deployment found. Deploying TestContract...${NC}"
+    # Deploy the contract automatically
+    cd "${PROJECT_DIR}/examples"
+    "${PROJECT_DIR}/scripts/deploy-contract.sh" --solc="${SOLC_PATH}" --rpc="${RPC_URL}" --private-key="${PRIVATE_KEY}" TestContract TestContract.sol --debug-dir=debug
+    
+    # Check again after deployment
+    if [ -f "${PROJECT_DIR}/examples/debug/deployment.json" ]; then
+        DEPLOYMENT_JSON="${PROJECT_DIR}/examples/debug/deployment.json"
+    else
+        echo -e "${RED}Deployment failed!${NC}"
+        exit 1
+    fi
 fi
 
 # Load deployment info
-DEPLOYMENT_INFO=$(cat "${PROJECT_DIR}/examples/debug/deployment.json")
-CONTRACT_ADDRESS=$(echo "$DEPLOYMENT_INFO" | grep -o '"contract_address": "[^"]*' | sed 's/"contract_address": "//')
-DEPLOY_TX=$(echo "$DEPLOYMENT_INFO" | grep -o '"transaction_hash": "[^"]*' | sed 's/"transaction_hash": "//')
+DEPLOYMENT_INFO=$(cat "$DEPLOYMENT_JSON")
+# Try new format first (from ETHDebug deploy script)
+CONTRACT_ADDRESS=$(echo "$DEPLOYMENT_INFO" | jq -r '.address // empty')
+DEPLOY_TX=$(echo "$DEPLOYMENT_INFO" | jq -r '.transaction // empty')
 
-# Use the test transaction provided by the user
-# This transaction calls the increment function
-TEST_TX="${TEST_TX:-0x8a387193d19ae8ff6d15b32b7abec4144601d98da8c2af1eebd9cf4061c033a7}"
+# Fallback to old format if needed
+if [ -z "$CONTRACT_ADDRESS" ]; then
+    CONTRACT_ADDRESS=$(echo "$DEPLOYMENT_INFO" | grep -o '"contract_address": "[^"]*' | sed 's/"contract_address": "//')
+fi
+if [ -z "$DEPLOY_TX" ]; then
+    DEPLOY_TX=$(echo "$DEPLOYMENT_INFO" | grep -o '"transaction_hash": "[^"]*' | sed 's/"transaction_hash": "//')
+fi
+
+# Use the test transaction provided by the user or create a new one
+# If we have a deployment and no TEST_TX is provided, create a fresh increment transaction
+if [ -z "$TEST_TX" ] && [ -n "$CONTRACT_ADDRESS" ]; then
+    echo -e "${YELLOW}Creating fresh test transaction...${NC}"
+    # Send an increment transaction and capture the TX hash
+    TX_OUTPUT=$(cd "${PROJECT_DIR}/examples" && DEBUG_DIR=debug RPC_URL="${RPC_URL}" "${PROJECT_DIR}/scripts/interact-contract.sh" send "increment(uint256)" 4 2>&1)
+    TEST_TX=$(echo "$TX_OUTPUT" | grep -o '0x[a-fA-F0-9]\{64\}' | head -1)
+    if [ -z "$TEST_TX" ]; then
+        echo -e "${RED}Failed to create test transaction${NC}"
+        echo "$TX_OUTPUT"
+        exit 1
+    fi
+    echo -e "${GREEN}Created test transaction: ${TEST_TX}${NC}"
+else
+    # Fallback to the old hardcoded transaction if nothing else works
+    TEST_TX="${TEST_TX:-0x8a387193d19ae8ff6d15b32b7abec4144601d98da8c2af1eebd9cf4061c033a7}"
+fi
 
 echo "Using contract: ${CONTRACT_ADDRESS}"
 echo "Using transaction: ${TEST_TX}"
@@ -78,7 +115,7 @@ config.test_contracts = {
     "contract_address": "${CONTRACT_ADDRESS}",
     "deploy_tx": "${DEPLOY_TX}",
     "test_tx": "${TEST_TX}",
-    "ethdebug_dir": "${PROJECT_DIR}/examples/debug/ethdebug_output"
+    "ethdebug_dir": "${PROJECT_DIR}/examples/debug"
 }
 config.solc_path = "${SOLC_PATH}"
 
