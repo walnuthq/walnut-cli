@@ -96,7 +96,15 @@ DEBUG_DIR="debug"
 
 NOTE: There is an experimental support for `solx` compiler. The defualt for now should be `solc`.
 
-### 1. Deploy a Contract
+### 1. Run node
+
+```
+$ docker run -it --rm --name nitro-dev -p 8547:8547 offchainlabs/nitro-node:v3.5.3-rc.3-653b078 --dev --http.addr 0.0.0.0 --http.api=net,web3,eth,arb,arbdebug,debug
+```
+
+TODO: Try with OP node!
+
+### 2. Deploy a Contract
 
 Deploy a Solidity contract with debug information:
 

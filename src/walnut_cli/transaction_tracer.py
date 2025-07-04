@@ -635,81 +635,13 @@ class TransactionTracer:
     
     def find_parameter_value_on_stack(self, trace: TransactionTrace, function_step: int, 
                                       param_index: int, param_type: str, func_name: str = None) -> Optional[Any]:
-        """Try to find parameter value by analyzing the stack and calling patterns.
+        """Try to find parameter value by analyzing the stack.
         
         NOTE: Without proper debug information about variable locations (which would come
-        from an enhanced ETHDebug format or DWARF-style debug info), we use heuristics
-        to locate parameters on the stack. This works for simple cases but may not be
-        accurate for complex calling patterns.
-        
-        Future improvements:
-        1. ETHDebug format should include variable location information
-        2. Solidity compiler could emit DWARF-style debug info with stack locations
-        3. We could analyze the bytecode pattern more deeply to understand the ABI
+        from an enhanced ETHDebug format or DWARF-style debug info), we cannot reliably
+        locate parameters on the stack.
         """
-        if function_step >= len(trace.steps):
-            return None
-            
-        step = trace.steps[function_step]
-        current_stack = step.stack if step.stack else []
-        
-        # Analyze the calling pattern to better understand parameter locations
-        pattern = self.analyze_calling_pattern(trace, function_step, func_name)
-        
-        # For Solidity internal function calls, use pattern analysis
-        base_offset = pattern['param_base_offset']
-        
-        # Try the most likely position first based on pattern analysis
-        param_position = base_offset + param_index
-        
-        # Analyze stack to find parameter position
-        # For Solidity internal calls, scan the stack for likely parameter values
-        if len(current_stack) > 2:
-            # Look for the parameter value by checking multiple positions
-            # In our testing, we found that for simple internal calls,
-            # the parameter is often at position 2 in the stack
-            for check_pos in [2, 3, 1, 4, 0]:
-                if check_pos < len(current_stack):
-                    try:
-                        val = int(current_stack[check_pos], 16)
-                        # Check if this could be our parameter
-                        # For increment functions, we expect small positive integers
-                        # TODO: HANDLE MORE TYPES!!! AND INVESTIGATE CALLING CONVENTION
-                        if param_type == 'uint256' and 0 < val < 100:
-                            param_position = check_pos
-                            break
-                    except:
-                        continue
-        
-        if param_position < len(current_stack):
-            try:
-                stack_value = current_stack[param_position]
-                if param_type == 'uint256':
-                    value = int(stack_value, 16)
-                    # Validate it's a reasonable parameter value
-                    # For internal calls, parameters are often small values
-                    if 0 < value < 2**64:  # Reasonable range
-                        return value
-                else:
-                    return f'0x{stack_value}'
-            except:
-                pass
-        
-        # If not found at expected position, scan nearby positions
-        search_range = range(max(0, param_position - 2), min(len(current_stack), param_position + 3))
-        for pos in search_range:
-            if pos != param_position and pos < len(current_stack):
-                try:
-                    stack_value = current_stack[pos]
-                    if param_type == 'uint256':
-                        value = int(stack_value, 16)
-                        # Additional heuristics to identify parameters
-                        # Parameters are often small positive integers
-                        if 0 < value < 1000:
-                            return value
-                except:
-                    continue
-        
+        # TODO: Only ETHDebug data is reliable, what can we do more?????
         return None
     
     def identify_function_boundaries_from_ethdebug(self, trace: TransactionTrace) -> Dict[int, Dict[str, Any]]:
@@ -863,12 +795,6 @@ class TransactionTracer:
     
     def analyze_function_calls(self, trace: TransactionTrace) -> List[FunctionCall]:
         """Analyze trace to extract function calls including internal calls.
-        
-        Enhanced with ETHDebug support for:
-        - Accurate function boundary detection
-        - Proper handling of different call types
-        - Return value tracking
-        - Improved internal function detection
         """
         function_calls = []
         call_stack = []  # Track active function calls
@@ -1049,19 +975,8 @@ class TransactionTracer:
                                     if param_value is not None:
                                         args.append((param_name, param_value))
                                     else:
-                                        # Fallback: try current stack or jump stack values
-                                        if idx < len(current_stack):
-                                            try:
-                                                stack_value = current_stack[idx]
-                                                if param_type == 'uint256':
-                                                    param_value = int(stack_value, 16)
-                                                    args.append((param_name, param_value))
-                                                else:
-                                                    args.append((param_name, f'0x{stack_value}'))
-                                            except:
-                                                args.append((param_name, '[passed via stack]'))
-                                        else:
-                                            args.append((param_name, '[passed via stack]'))
+                                        # No reliable way to determine parameter value
+                                        args.append((param_name, '<unknown>'))
                             
                             # Detect the call type using ETHDebug-enhanced method
                             call_type = self.detect_call_type(trace, i)
