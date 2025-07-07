@@ -194,7 +194,8 @@ class TraceSerializer:
         trace: TransactionTrace,
         logs_with_steps: List[Tuple[int, Dict[str, Any]]],
         all_calls: List[FunctionCall],
-        multi_parser: Optional[MultiContractETHDebugParser] = None
+        multi_parser: Optional[MultiContractETHDebugParser] = None,
+        tracer_instance = None
     ) -> Dict[str, Any]:
         """Convert a FunctionCall to TraceCall format."""
         trace_type = call.call_type.upper() if call.call_type else "INTERNALCALL"
@@ -234,6 +235,68 @@ class TraceSerializer:
             "callId": call.call_id,
             "parentCallId": call.parent_call_id,
             "childrenCallIds": call.children_call_ids[:],
+        }
+        
+        # Add decoded function information
+        trace_call["functionName"] = call.name
+        
+        # Extract and format input parameters
+        if call.args:
+            argument_types = []
+            argument_names = []
+            argument_values = []
+            
+            # Try to get ABI information for proper types
+            abi_item = None
+            if tracer_instance and hasattr(tracer_instance, 'function_abis') and call.selector:
+                abi_item = tracer_instance.function_abis.get(call.selector)
+            
+            for i, (param_name, param_value) in enumerate(call.args):
+                # Get type from ABI if available
+                if abi_item and 'inputs' in abi_item and i < len(abi_item['inputs']):
+                    param_info = abi_item['inputs'][i]
+                    param_type = param_info.get('type', 'uint256')
+                    
+                    # If it's a tuple (struct), expand the type to show components
+                    if param_type == 'tuple' and 'components' in param_info:
+                        # Build a detailed type string showing struct fields
+                        field_types = []
+                        for comp in param_info['components']:
+                            field_name = comp.get('name', 'field')
+                            field_type = comp.get('type', 'unknown')
+                            field_types.append(f"{field_name}:{field_type}")
+                        param_type = f"tuple({', '.join(field_types)})"
+                else:
+                    # Infer type from value
+                    if isinstance(param_value, str) and param_value.startswith('0x') and len(param_value) == 42:
+                        param_type = "address"
+                    elif isinstance(param_value, str) and param_value not in ['<unknown>', 'None']:
+                        param_type = "string"
+                    else:
+                        param_type = "uint256"
+                
+                argument_types.append(param_type)
+                argument_names.append(param_name)
+                argument_values.append(param_value)
+            
+            trace_call["inputs"] = {
+                "argumentsType": argument_types,
+                "argumentsName": argument_names,
+                "argumentsDecodedValue": argument_values
+            }
+        else:
+            # No arguments
+            trace_call["inputs"] = {
+                "argumentsType": [],
+                "argumentsName": [],
+                "argumentsDecodedValue": []
+            }
+        
+        # TODO: Add outputs data when available
+        trace_call["outputs"] = {
+            "argumentsType": [],
+            "argumentsName": [],
+            "argumentsDecodedValue": []
         }
         if trace_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
             if call.args:
@@ -283,7 +346,7 @@ class TraceSerializer:
             child = next((c for c in all_calls if c.call_id == child_id), None)
             if child:
                 child_calls.append(self.convert_function_call_to_trace_call(
-                    child, trace, logs_with_steps, all_calls, multi_parser
+                    child, trace, logs_with_steps, all_calls, multi_parser, tracer_instance
                 ))
         if child_calls:
             trace_call["calls"] = child_calls
@@ -574,7 +637,7 @@ class TraceSerializer:
 
         # Convert the root call and build the call tree recursively
         root_trace_call = self.convert_function_call_to_trace_call(
-            root_calls[0], trace, logs_with_steps, function_calls, multi_parser
+            root_calls[0], trace, logs_with_steps, function_calls, multi_parser, tracer_instance
         )
         # Ensure root call has proper from/to addresses and gas info
         root_trace_call["from"] = trace.from_addr

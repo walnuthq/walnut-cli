@@ -799,18 +799,18 @@ class TransactionTracer:
             comp_type = component['type']
             
             if comp_type == 'string':
-                parts.append(f"{name}={repr(val)}")
+                parts.append(f"{name}[{comp_type}]={repr(val)}")
             elif comp_type == 'address':
                 try:
                     formatted_addr = to_checksum_address(val)
-                    parts.append(f"{name}={formatted_addr}")
+                    parts.append(f"{name}[{comp_type}]={formatted_addr}")
                 except:
-                    parts.append(f"{name}={val}")
+                    parts.append(f"{name}[{comp_type}]={val}")
             elif comp_type == 'tuple' and component.get('components'):
                 nested_formatted = self.format_tuple_value(val, component['components'])
-                parts.append(f"{name}={nested_formatted}")
+                parts.append(f"{name}[{comp_type}]={nested_formatted}")
             else:
-                parts.append(f"{name}={val}")
+                parts.append(f"{name}[{comp_type}]={val}")
         
         return f"({', '.join(parts)})"
     
