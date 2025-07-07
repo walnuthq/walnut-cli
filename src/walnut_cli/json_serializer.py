@@ -153,6 +153,13 @@ class TraceSerializer:
         # Start with the selector
         input_data = call.selector
         
+        # Check if this is an internal call with unknown parameters
+        if call.call_type == "internal" and call.args:
+            has_unknown = any(param_value == '<unknown>' for _, param_value in call.args)
+            if has_unknown:
+                # For internal calls with unknown parameters, return only the selector
+                return input_data if input_data.startswith('0x') else '0x' + input_data
+        
         # Encode arguments if available
         if call.args:
             # Simple encoding - in reality, we'd use proper ABI encoding
