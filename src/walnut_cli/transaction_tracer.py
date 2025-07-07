@@ -722,19 +722,9 @@ class TransactionTracer:
             param_data_hex = calldata.hex()[8:]  # Skip 8 hex chars if bytes
         
         if selector not in self.function_abis:
-            # No ABI, return raw hex data if any
+            # No ABI, just return raw arguments
             if param_data_hex:
-                # Show raw calldata in 32-byte chunks (common for function arguments)
-                chunk_size = 64  # 32 bytes = 64 hex chars
-                for i in range(0, len(param_data_hex), chunk_size):
-                    chunk = param_data_hex[i:i+chunk_size]
-                    if chunk:
-                        # Try to interpret as uint256
-                        try:
-                            int_value = int(chunk, 16)
-                            params.append((f"arg{i//chunk_size}", f"{int_value} (0x{chunk})"))
-                        except:
-                            params.append((f"arg{i//chunk_size}", f"0x{chunk}"))
+                params.append(("arguments", f"0x{param_data_hex}"))
             return params
         
         abi_item = self.function_abis[selector]
@@ -2368,6 +2358,9 @@ class TransactionTracer:
                         entry_contract = self.multi_contract_parser.get_contract_at_address(call.contract_address)
                         if entry_contract:
                             has_debug_info = True
+                    elif self.ethdebug_info:
+                        # Single contract mode with ETHDebug info
+                        has_debug_info = True
                     
                     if has_debug_info:
                         call_type_display = dim("[entry]")
