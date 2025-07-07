@@ -12,7 +12,7 @@ from eth_hash.auto import keccak
 from web3 import Web3
 from hexbytes import HexBytes
 from .transaction_tracer import TransactionTrace, FunctionCall, TraceStep
-from .ethdebug_parser import ETHDebugInfo
+from .ethdebug_parser import ETHDebugInfo, ETHDebugParser
 from .multi_contract_ethdebug_parser import MultiContractETHDebugParser
 
 
@@ -363,6 +363,159 @@ class TraceSerializer:
         
         return abis_by_contract
     
+    def build_steps_array(
+        self, 
+        trace: TransactionTrace, 
+        function_calls: List[FunctionCall]
+    ) -> List[Dict[str, Any]]:
+        """Build the steps array mapping PC to trace call index."""
+        steps = []
+        
+        # Build a hierarchical representation of calls to assign indices
+        # The trace call tree is flattened in depth-first order
+        # Use id() to create hashable keys for FunctionCall objects
+        call_indices = {}
+        
+        def assign_indices_to_calls():
+            """Assign a unique index to each call in depth-first order."""
+            index = 0
+            
+            # Group calls by depth for hierarchical processing
+            calls_by_depth = {}
+            for call in function_calls:
+                if call.depth not in calls_by_depth:
+                    calls_by_depth[call.depth] = []
+                calls_by_depth[call.depth].append(call)
+            
+            # Sort calls within each depth by entry step
+            for depth_calls in calls_by_depth.values():
+                depth_calls.sort(key=lambda c: c.entry_step)
+            
+            # Process in depth-first order
+            def process_call(call, idx):
+                call_indices[id(call)] = idx
+                idx += 1
+                
+                # Find children of this call
+                child_depth = call.depth + 1
+                if child_depth in calls_by_depth:
+                    for child in calls_by_depth[child_depth]:
+                        # Check if child is within parent's range
+                        if (call.entry_step <= child.entry_step and 
+                            (call.exit_step is None or child.entry_step <= call.exit_step)):
+                            idx = process_call(child, idx)
+                
+                return idx
+            
+            # Start with root calls (external calls at depth 1, or depth 0 if no external)
+            root_depth = 1 if any(c.depth == 1 and c.call_type == "external" for c in function_calls) else 0
+            if root_depth in calls_by_depth:
+                for root_call in calls_by_depth[root_depth]:
+                    if root_call.call_type == "external" or root_depth == 0:
+                        index = process_call(root_call, index)
+                        break  # Only process the first root call
+            
+            return call_indices
+        
+        # Assign indices to all calls
+        call_index_map = assign_indices_to_calls()
+        
+        # Map each step to its corresponding call index
+        for i, step in enumerate(trace.steps):
+            # Find the deepest call that contains this step
+            containing_call = None
+            deepest_depth = -1
+            
+            for call in function_calls:
+                if (call.entry_step <= i and 
+                    (call.exit_step is None or i <= call.exit_step) and
+                    call.depth > deepest_depth):
+                    containing_call = call
+                    deepest_depth = call.depth
+            
+            # Get the index for this call, default to 0 (root call)
+            call_index = call_index_map.get(id(containing_call), 0) if containing_call else 0
+            
+            steps.append({
+                "pc": step.pc,
+                "traceCallIndex": call_index
+            })
+        
+        return steps
+    
+    def build_contracts_mapping(
+        self,
+        trace: TransactionTrace,
+        ethdebug_info: Optional[ETHDebugInfo],
+        multi_parser: Optional[MultiContractETHDebugParser],
+        abis: Dict[str, List[Dict[str, Any]]],
+        tracer_instance = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """Build the contracts mapping with PC to source mappings and sources."""
+        contracts = {}
+        
+        if multi_parser:
+            # Multi-contract mode
+            for address, contract_info in multi_parser.contracts.items():
+                contract_data = self._build_single_contract_data(
+                    address,
+                    contract_info.parser,
+                    contract_info.ethdebug_info,
+                    abis.get(address, [])
+                )
+                if contract_data:
+                    contracts[address] = contract_data
+        elif ethdebug_info and tracer_instance:
+            # Single contract mode
+            address = trace.to_addr
+            if address:
+                contract_data = self._build_single_contract_data(
+                    address,
+                    tracer_instance.ethdebug_parser,
+                    ethdebug_info,
+                    abis.get(address, [])
+                )
+                if contract_data:
+                    contracts[address] = contract_data
+        
+        return contracts
+    
+    def _build_single_contract_data(
+        self,
+        address: str,
+        parser: ETHDebugParser,
+        ethdebug_info: ETHDebugInfo,
+        abi: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Build debug data for a single contract."""
+        if not ethdebug_info:
+            return None
+        
+        # Build PC to source mappings in 's:l:f' format
+        pc_to_source_mappings = {}
+        for instruction in ethdebug_info.instructions:
+            if instruction.source_location:
+                loc = instruction.source_location
+                # Format: 'start:length:fileId'
+                mapping = f"{loc.offset}:{loc.length}:{loc.source_id}"
+                pc_to_source_mappings[instruction.offset] = mapping
+        
+        # Collect source files
+        sources = {}
+        for source_id, source_path in ethdebug_info.sources.items():
+            # Load the actual source content
+            source_lines = parser.load_source_file(source_path)
+            if source_lines:
+                sources[source_id] = "".join(source_lines)
+            else:
+                sources[source_id] = f"// Source file not found: {source_path}"
+        
+        return {
+            "pcToSourceMappings": pc_to_source_mappings,
+            "sources": sources,
+            "abi": abi
+        }
+    
     def serialize_trace(
         self,
         trace: TransactionTrace,
@@ -423,11 +576,25 @@ class TraceSerializer:
         # Build ABIs mapping
         abis = self.extract_internal_function_abi(function_calls, tracer_instance)
         
-        # Build the response
-        response = {
-            "traceCall": root_trace_call,
-            "abis": abis
-        }
+        # Build the response - check if we have step-by-step debugging info
+        if trace.steps and (ethdebug_info or multi_parser):
+            # Build step-by-step debugging response
+            steps = self.build_steps_array(trace, function_calls)
+            contracts = self.build_contracts_mapping(
+                trace, ethdebug_info, multi_parser, abis, tracer_instance
+            )
+            
+            response = {
+                "traceCall": root_trace_call,
+                "steps": steps,
+                "contracts": contracts
+            }
+        else:
+            # Basic response without step-by-step debugging
+            response = {
+                "traceCall": root_trace_call,
+                "abis": abis
+            }
         
         # Convert any non-serializable objects
         return self._convert_to_serializable(response)

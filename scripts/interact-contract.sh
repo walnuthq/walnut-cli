@@ -33,10 +33,10 @@ get_debug_command() {
     
     # Check if ethdebug format is available
     if [ -f "$abs_debug_dir/ethdebug.json" ]; then
-        echo "$WALNUT_DIR/walnut-cli.py $tx_hash --ethdebug-dir $abs_debug_dir --rpc $RPC_URL"
+        echo "walnut-cli trace $tx_hash --ethdebug-dir $abs_debug_dir --rpc $RPC_URL"
     else
         # Default to simple trace without debug info
-        echo "$WALNUT_DIR/walnut-cli.py $tx_hash --rpc $RPC_URL"
+        echo "walnut-cli trace $tx_hash --rpc $RPC_URL"
     fi
 }
 

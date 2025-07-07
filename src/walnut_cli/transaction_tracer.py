@@ -773,8 +773,16 @@ class TransactionTracer:
     def decode_value(self, raw_value: str, param_type: str) -> Any:
         """Decode a raw hex value based on its type."""
         try:
+            # Handle empty or invalid values
+            if not raw_value:
+                return 0 if param_type.startswith(('uint', 'int')) else '0x'
+            
+            # Remove 0x prefix if present
+            if raw_value.startswith('0x'):
+                raw_value = raw_value[2:]
+            
             if param_type == 'uint256' or param_type.startswith('uint'):
-                return int(raw_value, 16)
+                return int(raw_value, 16) if raw_value else 0
             elif param_type == 'int256' or param_type.startswith('int'):
                 # Handle signed integers
                 value = int(raw_value, 16)
@@ -971,7 +979,7 @@ class TransactionTracer:
         # Default to internal if no external call pattern found
         return "internal"
     
-    def extract_return_value(self, trace: TransactionTrace, exit_step: int, function_name: str) -> Optional[Any]:
+    def extract_return_value(self, trace: TransactionTrace, exit_step: int, function_name: str, selector: str = None) -> Optional[Any]:
         """Extract return value from a function exit.
         
         Args:
@@ -990,23 +998,48 @@ class TransactionTracer:
         # For RETURN opcode, the return data is specified by stack[0] (offset) and stack[1] (length)
         if step.op == "RETURN" and len(step.stack) >= 2:
             try:
+                # RETURN pops offset and length from stack (in that order)
+                # The exact stack layout depends on the trace format
                 offset = int(step.stack[0], 16)
                 length = int(step.stack[1], 16)
+                
+                # Check if function has return values in ABI
+                abi = None
+                if selector and selector in self.function_abis:
+                    abi = self.function_abis[selector]
+                else:
+                    # Try to find by function name (backward compatibility)
+                    for sel, abi_item in self.function_abis.items():
+                        if abi_item.get('name') == function_name:
+                            abi = abi_item
+                            break
+                
+                if abi:
+                    outputs = abi.get('outputs', [])
+                    # If function has no outputs, return None (void function)
+                    if not outputs:
+                        return None
                 
                 if length > 0 and step.memory:
                     # Extract return data from memory
                     return_data = step.memory[offset*2:(offset+length)*2]
                     
                     # Try to decode based on function return type
-                    if function_name in self.function_abis:
-                        abi = self.function_abis[function_name]
+                    if abi:
                         outputs = abi.get('outputs', [])
                         if outputs and len(outputs) == 1:
                             output_type = outputs[0].get('type', 'bytes')
+                            # For fixed-size types, only take the required bytes
+                            if output_type.startswith(('uint', 'int', 'address', 'bool')):
+                                # These are all 32 bytes
+                                return_data = return_data[:64]  # 64 hex chars = 32 bytes
                             return self.decode_value(return_data, output_type)
                     
                     # Return raw hex if we can't decode
                     return '0x' + return_data
+                elif length == 0:
+                    # No return data - this is a void function
+                    return None
             except Exception as e:
                 print(f"Warning: Failed to extract return value: {e}")
         
@@ -1301,7 +1334,7 @@ class TransactionTracer:
                         
                         # Try to extract return value if RETURN opcode
                         if step.op == "RETURN":
-                            call.return_value = self.extract_return_value(trace, i, call.name)
+                            call.return_value = self.extract_return_value(trace, i, call.name, call.selector)
         
         # Close any remaining open calls
         for call in call_stack:
