@@ -359,13 +359,6 @@ class TraceSerializer:
             trace_call["from"] = trace.from_addr if call.depth == 0 else (
                 call.contract_address if hasattr(call, 'contract_address') else None
             )
-            
-            # Add isVerified field for external calls
-            if multi_parser and call.contract_address:
-                target_contract = multi_parser.get_contract_at_address(call.contract_address)
-                trace_call["isVerified"] = target_contract is not None
-            else:
-                trace_call["isVerified"] = False
         elif trace_type == "INTERNALCALL":
             if hasattr(call, 'contract_address'):
                 trace_call["contractAddress"] = call.contract_address
@@ -438,6 +431,13 @@ class TraceSerializer:
         # Add isRevertedFrame if this frame caused the revert
         if hasattr(call, 'caused_revert') and call.caused_revert:
             trace_call["isRevertedFrame"] = True
+        
+        # Add isVerified field for all call types
+        if multi_parser and call.contract_address:
+            target_contract = multi_parser.get_contract_at_address(call.contract_address)
+            trace_call["isVerified"] = target_contract is not None
+        else:
+            trace_call["isVerified"] = False
 
         return trace_call
     

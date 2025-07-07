@@ -2280,7 +2280,17 @@ class TransactionTracer:
                 elif call.call_type == "internal":
                     call_type_display = info("[internal]")
                 elif call.call_type == "entry":
-                    call_type_display = dim("[entry]")
+                    # Check if we have debug info for the entry contract
+                    has_debug_info = False
+                    if self.multi_contract_parser and call.contract_address:
+                        entry_contract = self.multi_contract_parser.get_contract_at_address(call.contract_address)
+                        if entry_contract:
+                            has_debug_info = True
+                    
+                    if has_debug_info:
+                        call_type_display = dim("[entry]")
+                    else:
+                        call_type_display = warning("[entry] [non-verified]")
                 else:
                     call_type_display = dim(f"[{call.call_type}]")
                 
