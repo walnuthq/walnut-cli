@@ -115,6 +115,7 @@ class TransactionTracer:
         self.function_signatures = {}  # selector -> function name
         self.function_abis = {}  # selector -> full ABI item
         self.function_params = {}  # function name -> parameter info
+        self.function_abis_by_name = {}  # function name -> full ABI item
     
     def _log(self, message: str, level: str = "info"):
         """Log a message to stderr if not in quiet mode."""
@@ -669,6 +670,8 @@ class TransactionTracer:
                     self.function_abis[selector] = item
                     # Store parameter info by function name
                     self.function_params[name] = inputs
+                    # Also store ABI by function name for internal calls
+                    self.function_abis_by_name[name] = item
                     
         except Exception as e:
             print(f"Warning: Could not load ABI: {e}")
@@ -1239,7 +1242,31 @@ class TransactionTracer:
 
         
         # Find the main function entry
+        prev_depth = 0
         for i, step in enumerate(trace.steps):
+            # Check for depth decrease (returning from external call)
+            if i > 0 and step.depth < prev_depth:
+                # We're returning from an external call
+                # Find the most recent external call on the stack
+                for j in range(len(call_stack) - 1, -1, -1):
+                    if call_stack[j].call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
+                        returned_call = call_stack[j]
+                        returned_call.exit_step = i - 1
+                        returned_call.gas_used = trace.steps[returned_call.entry_step].gas - trace.steps[i-1].gas
+                        call_stack.pop(j)
+                        # Restore context
+                        if context_stack:
+                            context = context_stack.pop()
+                            current_contract = context['contract']
+                            current_depth = context['depth']
+                            # Restore ETHDebug info
+                            if 'ethdebug_info' in context:
+                                self.ethdebug_info = context['ethdebug_info']
+                            if 'ethdebug_parser' in context:
+                                self.ethdebug_parser = context['ethdebug_parser']
+                        break
+            
+            prev_depth = step.depth
             # Handle cross-contract calls
             if step.op in ["CALL", "DELEGATECALL", "STATICCALL"]:
                 call = self._process_external_call(step, i, current_contract, current_depth)
@@ -1264,10 +1291,19 @@ class TransactionTracer:
                     context_stack.append({
                         'contract': current_contract,
                         'depth': current_depth,
-                        'return_pc': step.pc + 1
+                        'return_pc': step.pc + 1,
+                        'ethdebug_info': self.ethdebug_info,
+                        'ethdebug_parser': self.ethdebug_parser
                     })
                     current_contract = call.contract_address
                     current_depth += 1
+                    
+                    # Switch to the target contract's ETHDebug info if available
+                    if self.multi_contract_parser and call.contract_address:
+                        target_contract = self.multi_contract_parser.get_contract_at_address(call.contract_address)
+                        if target_contract:
+                            self.ethdebug_info = target_contract.ethdebug_info
+                            self.ethdebug_parser = target_contract.parser
             # Internal functions
             elif step.op == "JUMPDEST":
                 call = self._detect_internal_call(step, i, current_contract, call_stack)
@@ -1275,12 +1311,8 @@ class TransactionTracer:
                     call.call_id = next_call_id
                     call.parent_call_id = call_stack[-1].call_id if call_stack else None
                     if call and hasattr(self, 'ethdebug_info') and self.ethdebug_info:
-                        # Pronađi ABI entry po imenu (ako nije overload)
-                        abi_entry = None
-                        for sel, abi in self.function_abis.items():
-                            if abi.get('name') == call.name:
-                                abi_entry = abi
-                                break
+                        # Find ABI entry by name using the name-based mapping
+                        abi_entry = self.function_abis_by_name.get(call.name)
                         if abi_entry:
                             args = []
                             for param in abi_entry.get('inputs', []):
@@ -1291,12 +1323,8 @@ class TransactionTracer:
                     # If we don't have ethdebug info or couldn't find parameters, try reading from stack
                     # For internal calls, parameters are passed via the stack
                     if call and call.call_type == "internal" and (not call.args or all(v[1] is None for v in call.args)):
-                        # Find ABI entry by name
-                        abi_entry = None
-                        for sel, abi in self.function_abis.items():
-                            if abi.get('name') == call.name:
-                                abi_entry = abi
-                                break
+                        # Find ABI entry by name using the name-based mapping
+                        abi_entry = self.function_abis_by_name.get(call.name)
                         
                         if abi_entry and step.stack:
                             # First check if any parameter is a complex type
@@ -1392,6 +1420,11 @@ class TransactionTracer:
                             context = context_stack.pop()
                             current_contract = context['contract']
                             current_depth = context['depth']
+                            # Restore ETHDebug info
+                            if 'ethdebug_info' in context:
+                                self.ethdebug_info = context['ethdebug_info']
+                            if 'ethdebug_parser' in context:
+                                self.ethdebug_parser = context['ethdebug_parser']
                             self._track_return_location(context['return_pc'])
                         break
                     else:
@@ -1584,22 +1617,32 @@ class TransactionTracer:
 
         # Try to decode function signature
         func_name = "unknown"
+        decoded_params = []
+        selector = None
+        
         if calldata and len(calldata) >= 10:  # 0x + 4 bytes
             selector = calldata[:10]
             if selector in self.function_signatures:
                 func_name = self.function_signatures[selector]['name']
+                # Decode the actual function parameters from calldata
+                decoded_params = self.decode_function_parameters(selector, calldata)
             else:
                 # Try 4byte directory lookup
                 func_name = self.lookup_function_signature(selector) or f"function_{selector}"
+                # For unknown functions, just show raw CALL parameters
+                decoded_params = [("to", to_addr), ("value", value), ("gas", gas)]
+        else:
+            # No calldata, show CALL parameters
+            decoded_params = [("to", to_addr), ("value", value), ("gas", gas)]
 
         return FunctionCall(
             name=f"{step.op} → {contract_name}::{func_name}",
-            selector=calldata[:10] if calldata else "",
+            selector=selector or "",
             entry_step=step_idx,
             exit_step=None,
             gas_used=0,
             depth=current_depth + 1,
-            args=[("to", to_addr), ("value", value), ("gas", gas)],
+            args=decoded_params,
             call_type=step.op,
             contract_address=to_addr
         )
