@@ -162,13 +162,13 @@ Each transaction returns a hash that can be debugged.
 
 ```bash
 # Debug with ETHDebug information
-./walnut-cli.py 0x123... --ethdebug-dir ./debug
+./walnut-cli.py trace 0x123... --ethdebug-dir ./debug
 
 # Or if walnut.config.yaml is configured correctly
-./walnut-cli.py 0x123...
+./walnut-cli.py trace 0x123...
 
 # Show raw execution trace
-./walnut-cli.py 0x123... --raw
+./walnut-cli.py trace 0x123... --raw
 ```
 
 This shows a high-level function call trace with gas usage and source mappings.
@@ -191,7 +191,7 @@ This approach is to use the standard ethdebug format from the Solidity compiler 
 
 2. **Trace transactions with ethdebug**:
    ```bash
-   ./walnut-cli.py 0x123...abc --ethdebug-dir /tmp/ethdebug-output
+   ./walnut-cli.py trace 0x123...abc --ethdebug-dir /tmp/ethdebug-output
    ```
 
 ### Other formats
@@ -236,7 +236,7 @@ Currently, walnut-cli supports the standard ETHDebug format. Additional formats 
 
 4. **Debug the transaction**:
    ```bash
-   ./walnut-cli.py 0x123... --ethdebug-dir ./debug
+   ./walnut-cli.py trace 0x123... --ethdebug-dir ./debug
    # Shows function call trace with proper function names
    ```
 
@@ -284,7 +284,7 @@ If you prefer to compile, deploy, and interact manually:
 4. **Debug the transaction**:
    ```bash
    # Use the transaction hash from step 3
-   ./walnut-cli.py 0xYOUR_TX_HASH --ethdebug-dir ./debug
+   ./walnut-cli.py trace 0xYOUR_TX_HASH --ethdebug-dir ./debug
    ```
 
 ### Reading contract state (view functions):
@@ -296,13 +296,14 @@ cast call CONTRACT_ADDRESS "counter()(uint256)" --rpc-url http://localhost:8545
 ## Example Output
 
 ```
-walnut-cli.py 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994 --ethdebug-dir debug --rpc http://localhost:8545
+walnut-cli.py trace 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994 --ethdebug-dir debug --rpc http://localhost:8545
 Loading transaction 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994...
 Loaded 1833 PC mappings from ethdebug
 Contract: TestContract
 Environment: runtime
 
 Function Call Trace: 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994
+Contract: 0x5FbDB2315678afecb367f032d93F642f64180aa3
 Gas used: 1225735
 
 Call Stack:
@@ -321,7 +322,7 @@ Use --raw flag to see detailed instruction trace
 
 The raw output:
 ```
-$ ./walnut-cli.py 0x123...abc --ethdebug-dir debug --raw
+$ ./walnut-cli.py trace 0x123...abc --ethdebug-dir debug --raw
 
 Loaded 300 PC mappings from ethdebug
 Contract: HelloWorld

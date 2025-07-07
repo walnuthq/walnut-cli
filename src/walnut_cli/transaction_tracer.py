@@ -1116,6 +1116,8 @@ class TransactionTracer:
     def print_function_trace(self, trace: TransactionTrace, function_calls: List[FunctionCall]):
         """Print pretty function call trace."""
         print(f"\n{bold('Function Call Trace:')} {info(trace.tx_hash)}")
+        if trace.to_addr:
+            print(f"{dim('Contract:')} {info(trace.to_addr)}")
         print(f"{dim('Gas used:')} {number(str(trace.gas_used))}")
         
         if trace.error:

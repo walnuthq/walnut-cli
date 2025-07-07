@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Trace and debug an Ethereum transaction
+Walnut CLI - Ethereum transaction analysis tool
 
-Usage: walnut-cli.py <tx_hash> [options]
+Usage: walnut-cli.py <command> [options]
+
+Commands:
+  trace <tx_hash>                     Trace and debug an Ethereum transaction
 
 Options:
   --ethdebug-dir <dir>                Load ethdebug format from directory
@@ -42,18 +45,8 @@ def find_debug_file(contract_addr: str) -> str:
     return None
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Trace and debug an Ethereum transaction')
-    parser.add_argument('tx_hash', help='Transaction hash to trace')
-    # parser.add_argument('--debug-info-from-zasm-file', '-d', help='Load debug info from .zasm file (solx/evm-dwarf format)')
-    parser.add_argument('--ethdebug-dir', '-e', help='ETHDebug directory containing ethdebug.json and contract debug files')
-    parser.add_argument('--rpc', '-r', default='http://localhost:8545', help='RPC URL')
-    parser.add_argument('--max-steps', '-m', type=int, default=50, help='Maximum steps to show (use 0 or -1 for all steps)')
-    parser.add_argument('--interactive', '-i', action='store_true', help='Start interactive debugger')
-    parser.add_argument('--raw', action='store_true', help='Show raw instruction trace instead of function call trace')
-    
-    args = parser.parse_args()
-    
+def trace_command(args):
+    """Execute the trace command."""
     # Create tracer
     tracer = TransactionTracer(args.rpc)
     
@@ -155,6 +148,32 @@ def main():
             debugger.cmdloop()
         except KeyboardInterrupt:
             print("\nInterrupted")
+    
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Walnut CLI - Ethereum transaction analysis tool')
+    
+    # Create subparsers for different commands
+    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    subparsers.required = True
+    
+    # Create the 'trace' subcommand
+    trace_parser = subparsers.add_parser('trace', help='Trace and debug an Ethereum transaction')
+    trace_parser.add_argument('tx_hash', help='Transaction hash to trace')
+    # trace_parser.add_argument('--debug-info-from-zasm-file', '-d', help='Load debug info from .zasm file (solx/evm-dwarf format)')
+    trace_parser.add_argument('--ethdebug-dir', '-e', help='ETHDebug directory containing ethdebug.json and contract debug files')
+    trace_parser.add_argument('--rpc', '-r', default='http://localhost:8545', help='RPC URL')
+    trace_parser.add_argument('--max-steps', '-m', type=int, default=50, help='Maximum steps to show (use 0 or -1 for all steps)')
+    trace_parser.add_argument('--interactive', '-i', action='store_true', help='Start interactive debugger')
+    trace_parser.add_argument('--raw', action='store_true', help='Show raw instruction trace instead of function call trace')
+    
+    args = parser.parse_args()
+    
+    # Handle commands
+    if args.command == 'trace':
+        return trace_command(args)
     
     return 0
 
