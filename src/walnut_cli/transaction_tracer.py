@@ -1341,7 +1341,9 @@ class TransactionTracer:
                 if call:
                     call.call_id = next_call_id
                     call.parent_call_id = call_stack[-1].call_id if call_stack else None
-                    if call and hasattr(self, 'ethdebug_info') and self.ethdebug_info:
+                    if call and hasattr(self, 'ethdebug_info') and self.ethdebug_info and call.call_type != "internal":
+                        # For external calls, try ETHDebug first
+                        # Skip ETHDebug for internal calls as we'll handle them differently
                         # Find ABI entry by name using the name-based mapping
                         abi_entry = self.function_abis_by_name.get(call.name)
                         if abi_entry:
@@ -1351,80 +1353,110 @@ class TransactionTracer:
                                 args.append((param['name'], value))
                             call.args = args
                     
-                    # If we don't have ethdebug info or couldn't find parameters, try reading from stack
                     # For internal calls, parameters are passed via the stack
-                    if call and call.call_type == "internal" and (not call.args or all(v[1] is None for v in call.args)):
+                    if call and call.call_type == "internal":
+                        # Check if we have a parent call with known argument types
+                        parent_call = call_stack[-1] if call_stack else None
+                        inherited_args = {}
+                        
+                        # If parent is an external CALL with the same function name, inherit its arguments
+                        if (parent_call and parent_call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"] 
+                            and parent_call.args and parent_call.name and call.name
+                            and parent_call.name.split("::")[1].split("(")[0] == call.name):
+                            # Build a dict of inherited args
+                            for name, value in parent_call.args:
+                                if value is not None:
+                                    inherited_args[name] = value
+                            # Clear existing args to avoid duplication
+                            call.args = []
+                        # Don't inherit from internal function parents as they may have modified the parameters
+                        
+                        # Now process all parameters, using inherited values when available
+                        # and falling back to stack decoding when not
                         # Find ABI entry by name using the name-based mapping
                         abi_entry = self.function_abis_by_name.get(call.name)
                         
-                        if abi_entry and step.stack:
-                            # First check if any parameter is a complex type
-                            has_complex_types = False
-                            for param in abi_entry.get('inputs', []):
-                                param_type = param['type']
-                                if (param_type.startswith('tuple') or '(' in param_type or 
-                                    param_type.endswith('[]') or '[' in param_type or
-                                    param_type in ['string', 'bytes']):
-                                    has_complex_types = True
-                                    break
+                        if abi_entry:
+                            # Clear any existing args to avoid duplication
+                            call.args = []
                             
-                            # If there are complex types, we can't reliably read any parameters
-                            # because we don't know how many stack slots they occupy
-                            if has_complex_types:
-                                # Keep the args as they were (likely None from ETHDebug attempt)
-                                # TODO: Implement support for complex types (structs, arrays, dynamic types)
-                                # This would require:
-                                # 1. Parsing the ABI type definitions to understand memory layout
-                                # 2. Calculating the number of stack slots each type occupies
-                                # 3. Properly decoding multi-slot values (e.g., struct fields, array elements)
-                                # 4. Handling dynamic types that use pointers to memory/storage
-                                pass
-                            else:
-                                args = []
-                                # For internal calls, parameters are typically at the end of the stack
-                                # The stack grows from left to right, so parameters are at higher indices
-                                num_params = len(abi_entry.get('inputs', []))
-                                
-                                # For internal calls, parameters are at the end of the stack in reverse order
-                                # Due to LIFO nature: increment3(arg1, arg2) -> stack has [.., arg1, arg2] 
-                                # where arg2 is at the top (higher index)
-                                
-                                for i, param in enumerate(abi_entry.get('inputs', [])):
-                                    param_name = param['name']
+                            if step.stack:
+                                # First check if any parameter is a complex type
+                                has_complex_types = False
+                                for param in abi_entry.get('inputs', []):
                                     param_type = param['type']
+                                    if (param_type.startswith('tuple') or '(' in param_type or 
+                                        param_type.endswith('[]') or '[' in param_type or
+                                        param_type in ['string', 'bytes']):
+                                        has_complex_types = True
+                                        break
                                 
-                                    
-                                    # Parameters are at the end of stack in reverse order due to LIFO
-                                    # First parameter is deepest, last parameter is at top
-                                    stack_idx = len(step.stack) - 1 - i
-                                    if 0 <= stack_idx < len(step.stack):
-                                        try:
-                                            raw_value = step.stack[stack_idx]
-                                            decoded_value = self.decode_value(raw_value, param_type)
-                                            args.append((param_name, decoded_value))
-                                        except:
-                                            # If that doesn't work, try looking for the value elsewhere in stack
-                                            # Sometimes the parameter is at a different position
-                                            found = False
-                                            for j in range(len(step.stack)-1, -1, -1):
-                                                try:
-                                                    raw_value = step.stack[j]
-                                                    # Check if this could be our parameter (for uint256, should be reasonable)
-                                                    if param_type.startswith('uint') and raw_value.startswith('0x'):
-                                                        val = int(raw_value, 16)
-                                                        if val > 0 and val < 1000000:  # Reasonable range
-                                                            decoded_value = self.decode_value(raw_value, param_type)
-                                                            args.append((param_name, decoded_value))
-                                                            found = True
-                                                            break
-                                                except:
-                                                    continue
-                                            if not found:
+                                # If there are complex types, we can't reliably read any parameters
+                                # because we don't know how many stack slots they occupy
+                                if has_complex_types:
+                                    # For complex types, still try to inherit from external CALL parent if available
+                                    if inherited_args:
+                                        args = []
+                                        for param in abi_entry.get('inputs', []):
+                                            param_name = param['name']
+                                            if param_name in inherited_args:
+                                                args.append((param_name, inherited_args[param_name]))
+                                            else:
                                                 args.append((param_name, None))
+                                        call.args = args
                                     else:
-                                        args.append((param_name, None))
-                                
-                                call.args = args
+                                        # Keep empty args for complex types when we can't decode them
+                                        pass
+                                else:
+                                    args = []
+                                    # For internal calls, parameters are typically at the end of the stack
+                                    # The stack grows from left to right, so parameters are at higher indices
+                                    num_params = len(abi_entry.get('inputs', []))
+                                    
+                                    # For internal calls, parameters are at the end of the stack in reverse order
+                                    # Due to LIFO nature: increment3(arg1, arg2) -> stack has [.., arg1, arg2] 
+                                    # where arg2 is at the top (higher index)
+                                    
+                                    for i, param in enumerate(abi_entry.get('inputs', [])):
+                                        param_name = param['name']
+                                        param_type = param['type']
+                                        
+                                        # First check if we have an inherited value
+                                        if param_name in inherited_args:
+                                            args.append((param_name, inherited_args[param_name]))
+                                            continue
+                                        
+                                        # Parameters are at the end of stack in reverse order due to LIFO
+                                        # First parameter is deepest, last parameter is at top
+                                        stack_idx = len(step.stack) - 1 - i
+                                        if 0 <= stack_idx < len(step.stack):
+                                            try:
+                                                raw_value = step.stack[stack_idx]
+                                                decoded_value = self.decode_value(raw_value, param_type)
+                                                args.append((param_name, decoded_value))
+                                            except:
+                                                # If that doesn't work, try looking for the value elsewhere in stack
+                                                # Sometimes the parameter is at a different position
+                                                found = False
+                                                for j in range(len(step.stack)-1, -1, -1):
+                                                    try:
+                                                        raw_value = step.stack[j]
+                                                        # Check if this could be our parameter (for uint256, should be reasonable)
+                                                        if param_type.startswith('uint') and raw_value.startswith('0x'):
+                                                            val = int(raw_value, 16)
+                                                            if val > 0 and val < 1000000:  # Reasonable range
+                                                                decoded_value = self.decode_value(raw_value, param_type)
+                                                                args.append((param_name, decoded_value))
+                                                                found = True
+                                                                break
+                                                    except:
+                                                        continue
+                                                if not found:
+                                                    args.append((param_name, None))
+                                        else:
+                                            args.append((param_name, None))
+                                        
+                                    call.args = args
                     if call_stack:
                         # Only add as child if the depth is greater than parent
                         parent_call = call_stack[-1]
