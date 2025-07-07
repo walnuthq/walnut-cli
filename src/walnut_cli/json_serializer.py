@@ -193,7 +193,8 @@ class TraceSerializer:
         call: FunctionCall, 
         trace: TransactionTrace,
         logs_with_steps: List[Tuple[int, Dict[str, Any]]],
-        all_calls: List[FunctionCall]
+        all_calls: List[FunctionCall],
+        multi_parser: Optional[MultiContractETHDebugParser] = None
     ) -> Dict[str, Any]:
         """Convert a FunctionCall to TraceCall format."""
         trace_type = call.call_type.upper() if call.call_type else "INTERNALCALL"
@@ -245,6 +246,13 @@ class TraceSerializer:
             trace_call["from"] = trace.from_addr if call.depth == 0 else (
                 call.contract_address if hasattr(call, 'contract_address') else None
             )
+            
+            # Add isVerified field for external calls
+            if multi_parser and call.contract_address:
+                target_contract = multi_parser.get_contract_at_address(call.contract_address)
+                trace_call["isVerified"] = target_contract is not None
+            else:
+                trace_call["isVerified"] = False
         elif trace_type == "INTERNALCALL":
             if hasattr(call, 'contract_address'):
                 trace_call["contractAddress"] = call.contract_address
@@ -275,7 +283,7 @@ class TraceSerializer:
             child = next((c for c in all_calls if c.call_id == child_id), None)
             if child:
                 child_calls.append(self.convert_function_call_to_trace_call(
-                    child, trace, logs_with_steps, all_calls
+                    child, trace, logs_with_steps, all_calls, multi_parser
                 ))
         if child_calls:
             trace_call["calls"] = child_calls
@@ -566,7 +574,7 @@ class TraceSerializer:
 
         # Convert the root call and build the call tree recursively
         root_trace_call = self.convert_function_call_to_trace_call(
-            root_calls[0], trace, logs_with_steps, function_calls
+            root_calls[0], trace, logs_with_steps, function_calls, multi_parser
         )
         # Ensure root call has proper from/to addresses and gas info
         root_trace_call["from"] = trace.from_addr

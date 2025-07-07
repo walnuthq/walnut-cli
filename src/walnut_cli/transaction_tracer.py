@@ -2034,14 +2034,20 @@ class TransactionTracer:
                 
                 # Add call type indicator with enhanced info for external calls
                 if call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
-                    # For external calls, show the target contract name if available
+                    # For external calls, check if we have debug info
+                    has_debug_info = False
                     target_info = ""
                     if self.multi_contract_parser and call.contract_address:
-                        # Extract target address from args
                         target_contract = self.multi_contract_parser.get_contract_at_address(call.contract_address)
                         if target_contract:
+                            has_debug_info = True
                             target_info = f" → {target_contract.name}"
-                    call_type_display = success(f"[{call.call_type}]{target_info}")
+                    
+                    # Add [non-verified] indicator for contracts without debug info
+                    if has_debug_info:
+                        call_type_display = success(f"[{call.call_type}]{target_info}")
+                    else:
+                        call_type_display = warning(f"[{call.call_type}] [non-verified]")
                 elif call.call_type == "external":
                     call_type_display = success("[external]")
                 elif call.call_type == "internal":
