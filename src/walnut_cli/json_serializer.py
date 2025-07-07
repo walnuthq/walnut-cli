@@ -418,6 +418,10 @@ class TraceSerializer:
                     pass
         # Add function name
         trace_call["function_name"] = call.name
+        
+        # Add isRevertedFrame if this frame caused the revert
+        if hasattr(call, 'caused_revert') and call.caused_revert:
+            trace_call["isRevertedFrame"] = True
 
         return trace_call
     

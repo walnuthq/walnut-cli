@@ -36,6 +36,7 @@ class FunctionCall:
     contract_address: Optional[str] = None
     parent_entry_step: Optional[int] = None
     call_id: int = 0
+    caused_revert: bool = False  # True if this frame initiated the revert
     parent_call_id: Optional[int] = None
     children_call_ids: List[int] = field(default_factory=list)
 
@@ -1215,6 +1216,7 @@ class TransactionTracer:
         current_contract = trace.to_addr
         current_depth = 0
         context_stack = []
+        revert_already_marked = False  # Track if we've already marked a revert frame
         
         # Track parent-child relationships properly
         active_parents = []  # Stack of active parent call IDs
@@ -1411,10 +1413,17 @@ class TransactionTracer:
                     call_stack.append(call)
             # Exit from function
             elif step.op in ["RETURN", "REVERT", "STOP"]:
+                # If this is a REVERT, find and mark the deepest active frame (only once)
+                if step.op == "REVERT" and call_stack and not revert_already_marked:
+                    # The deepest frame (last in stack) is the one that initiated the revert
+                    call_stack[-1].caused_revert = True
+                    revert_already_marked = True
+                
                 while call_stack:
                     call = call_stack.pop()
                     call.exit_step = i
                     call.gas_used = trace.steps[call.entry_step].gas - step.gas
+                    
                     if call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
                         if context_stack:
                             context = context_stack.pop()
@@ -2186,7 +2195,9 @@ class TransactionTracer:
                     else:
                         source_info = dim(f" @ Contract entry point")
                 
-                print(f"{indent}#{i} {func_display} {call_type_display} {gas_info}{source_info}")
+                # Add indicator for the frame that caused the revert
+                revert_indicator = f" {error('!!!')}" if call.caused_revert else ""
+                print(f"{indent}#{i} {func_display} {call_type_display} {gas_info}{source_info}{revert_indicator}")
                 
                 # Show entry/exit steps for non-entry-point functions
                 if call.depth > 0:  # Show steps for actual function calls, not dispatcher
