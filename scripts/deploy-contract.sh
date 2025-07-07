@@ -18,7 +18,7 @@ fi
 # Default configuration
 RPC_URL="${RPC_URL:-http://localhost:8545}"
 PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
-DEBUG_DIR="${DEBUG_DIR:-build/debug/ethdebug}"
+DEBUG_DIR="${DEBUG_DIR:-debug}"
 SOLC_PATH="${SOLC_PATH:-solc}"
 
 # Colors for output
@@ -44,7 +44,7 @@ usage() {
     echo "  --solc=PATH       Path to solc binary (default: solc)"
     echo "  --rpc=URL         RPC URL (default: http://localhost:8545)"
     echo "  --private-key=KEY Private key for deployment"
-    echo "  --debug-dir=DIR   ETHDebug output directory (default: build/debug/ethdebug)"
+    echo "  --debug-dir=DIR   ETHDebug output directory (default: debug)"
     echo "  --dual-compile    Create both optimized and unoptimized builds"
     echo "  -h, --help        Show this help message"
     echo ""
@@ -282,7 +282,7 @@ DEPLOY_OUTPUT=$(cast send \
     --rpc-url "$RPC_URL" \
     --private-key "$PRIVATE_KEY" \
     --create "$BYTECODE" \
-    --json 2>/dev/null)
+    --json)
 
 # Extract transaction hash and contract address
 TX_HASH=$(echo "$DEPLOY_OUTPUT" | jq -r '.transactionHash')

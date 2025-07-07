@@ -19,7 +19,7 @@ RPC_URL="${RPC_URL:-http://localhost:8545}"
 PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 DEBUG_DIR="${DEBUG_DIR:-debug}"
 
-# Function to get the appropriate debug command based on available debug format
+# Function to get the debug command for walnut-cli
 get_debug_command() {
     local tx_hash="$1"
     
@@ -31,16 +31,9 @@ get_debug_command() {
         abs_debug_dir="$(pwd)/$DEBUG_DIR"
     fi
     
-    # Check if ethdebug format is available in subdirectory
-    if [ -d "$abs_debug_dir/ethdebug_output" ] && [ -f "$abs_debug_dir/ethdebug_output/ethdebug.json" ]; then
-        echo "$WALNUT_DIR/walnut-cli.py $tx_hash --ethdebug-dir $abs_debug_dir/ethdebug_output --rpc $RPC_URL"
-    # Check if ethdebug format is available directly in debug dir
-    elif [ -f "$abs_debug_dir/ethdebug.json" ]; then
+    # Check if ethdebug format is available
+    if [ -f "$abs_debug_dir/ethdebug.json" ]; then
         echo "$WALNUT_DIR/walnut-cli.py $tx_hash --ethdebug-dir $abs_debug_dir --rpc $RPC_URL"
-    # Check if DWARF/zasm format is available
-    elif ls "$abs_debug_dir"/*.runtime.zasm >/dev/null 2>&1; then
-        local zasm_file=$(ls "$abs_debug_dir"/*.runtime.zasm | head -1)
-        echo "$WALNUT_DIR/walnut-cli.py $tx_hash --debug-info-from-zasm-file $zasm_file --rpc $RPC_URL"
     else
         # Default to simple trace without debug info
         echo "$WALNUT_DIR/walnut-cli.py $tx_hash --rpc $RPC_URL"
@@ -55,9 +48,8 @@ YELLOW='\033[0;33m'
 NC='\033[0m'
 
 # Load deployment info
-# Check both old and new locations
-if [ -f "$DEBUG_DIR/ethdebug_output/deployment.json" ]; then
-    DEPLOYMENT_JSON="$DEBUG_DIR/ethdebug_output/deployment.json"
+if [ -f "$DEBUG_DIR/deployment.json" ]; then
+    DEPLOYMENT_JSON="$DEBUG_DIR/deployment.json"
 elif [ -f "$DEBUG_DIR/deployment.json" ]; then
     DEPLOYMENT_JSON="$DEBUG_DIR/deployment.json"
 else
@@ -101,7 +93,7 @@ case "$COMMAND" in
             "setNumber(uint256)" "$VALUE" \
             --rpc-url "$RPC_URL" \
             --private-key "$PRIVATE_KEY" \
-            --json 2>/dev/null)
+            --json)
         
         TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
         echo -e "${GREEN}Transaction: $TX_HASH${NC}"
@@ -118,7 +110,7 @@ case "$COMMAND" in
             "increment(uint256)" "$AMOUNT" \
             --rpc-url "$RPC_URL" \
             --private-key "$PRIVATE_KEY" \
-            --json 2>/dev/null)
+            --json)
         
         TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
         echo -e "${GREEN}Transaction: $TX_HASH${NC}"
@@ -135,7 +127,7 @@ case "$COMMAND" in
         CALL_RESULT=$(cast call \
             "$CONTRACT_ADDR" \
             "$SIG" "$@" \
-            --rpc-url "$RPC_URL" 2>/dev/null)
+            --rpc-url "$RPC_URL")
         
         if [ $? -eq 0 ] && [ -n "$CALL_RESULT" ]; then
             # This is a view/pure function - show the result
@@ -149,7 +141,7 @@ case "$COMMAND" in
                 "$SIG" "$@" \
                 --rpc-url "$RPC_URL" \
                 --private-key "$PRIVATE_KEY" \
-                --json 2>/dev/null)
+                --json)
             
             TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
             echo -e "${GREEN}Transaction: $TX_HASH${NC}"
@@ -168,7 +160,7 @@ case "$COMMAND" in
             "$SIG" "$@" \
             --rpc-url "$RPC_URL" \
             --private-key "$PRIVATE_KEY" \
-            --json 2>/dev/null)
+            --json)
         
         TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
         echo -e "${GREEN}Transaction: $TX_HASH${NC}"

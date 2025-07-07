@@ -8,6 +8,8 @@ A transaction-based debugger for Solidity smart contracts.
 
 1. Transaction tracing
 
+**Requirements**: Solidity compiler 0.8.29+ (for ETHDebug support)
+
 ## Installation
 
 ### Virtual Env (Recommended)
@@ -38,19 +40,18 @@ pip install walnut-cli
 
 ### Prerequisites
 
-#### For ETHDebug format (Recommended):
-
-1. **Standard Solidity compiler** (0.8.13+):
+1. **Solidity compiler** (0.8.29+ required for ETHDebug support):
    ```bash
    # Install via package manager or download from https://github.com/ethereum/solidity/releases
    brew install solidity  # macOS
    # or
    sudo apt-get install solc  # Ubuntu
+   
+   # Verify version (must be 0.8.29 or higher)
+   solc --version
    ```
 
-#### For contract deployment:
-
-2. **Foundry**: For contract deployment and interaction
+2. **Foundry**: For contract deployment and Anvil node
    ```bash
    curl -L https://foundry.paradigm.xyz | bash
    foundryup
@@ -58,7 +59,7 @@ pip install walnut-cli
 
 ### Setup
 
-After installation, run the setup script to configure external tools (only needed for DWARF format):
+After installation, run the setup script to configure your environment:
 ```bash
 walnut-setup  # If installed via pip
 # or
@@ -66,12 +67,10 @@ walnut-setup  # If installed via pip
 ```
 
 This will:
-- Find or ask for the path to solx (experimental DWARF format only)
-- Find or ask for the path to evm-dwarf (experimental DWARF format only)
-- Configure RPC endpoint and private key
+- Check for Solidity compiler with ETHDebug support (0.8.29+)
+- Configure RPC endpoint (default: http://localhost:8545 for Anvil)
+- Configure private key (default: Anvil's test account #0)
 - Create `walnut.config.local` with your settings
-
-**Note**: If you're only using ETHDebug format (recommended), you can skip this step and use the tool directly.
 
 Verify your setup:
 ```bash
@@ -91,8 +90,8 @@ Configuration is stored in `walnut.config.local` (gitignored). You can also:
 # Ethereum RPC endpoint
 RPC_URL="http://localhost:8545"
 
-# Private key for deployments
-PRIVATE_KEY="0x..."
+# Private key for deployments (default: Anvil's test account #0)
+PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
 # Debug output directory
 DEBUG_DIR="debug"
@@ -100,41 +99,38 @@ DEBUG_DIR="debug"
 
 ## Usage
 
-NOTE: There is an experimental support for `solx` compiler. The defualt for now should be `solc`.
+### 1. Run Anvil node with tracing enabled
 
-### 1. Run node
-
+```bash
+# Run Anvil with step tracing enabled (required for debugging)
+$ anvil --fork-url https://reth-ethereum.ithaca.xyz/rpc --optimism --steps-tracing
 ```
-$ docker run -it --rm --name nitro-dev -p 8547:8547 offchainlabs/nitro-node:v3.5.3-rc.3-653b078 --dev --http.addr 0.0.0.0 --http.api=net,web3,eth,arb,arbdebug,debug
-```
 
-TODO: Try with OP node!
+**Important**: The `--steps-tracing` flag is required for walnut-cli to get execution traces.
 
 ### 2. Deploy a Contract
 
 Deploy a Solidity contract with debug information:
 
-#### Using solc with ETHDebug (Recommended):
-
 ```bash
-# Auto-detects solc and uses ethdebug format
-./scripts/deploy-contract.sh Counter src/Counter.sol
+# Deploy TestContract example
+./scripts/deploy-contract.sh TestContract examples/TestContract.sol
 
-# Explicitly use solc
-./scripts/deploy-contract.sh --compiler=solc Counter src/Counter.sol
+# Deploy your own contract
+./scripts/deploy-contract.sh Counter src/Counter.sol
 
 # With custom settings
 ./scripts/deploy-contract.sh \
-  --compiler=solc \
+  --solc=/path/to/custom/solc \
   --rpc=http://localhost:8545 \
   --debug-dir=my-debug \
   Counter src/Counter.sol
 ```
 
 This will:
-- Compile with `solc --via-ir --debug-info ethdebug --ethdebug`
+- Compile with ETHDebug support: `solc --via-ir --debug-info ethdebug --ethdebug`
 - Deploy to the blockchain
-- Save ethdebug JSON files to `./debug/ethdebug_output/`
+- Save ETHDebug JSON files to `./debug/`
 - Generate deployment info
 
 ### 2. Interact with Contract
@@ -164,26 +160,28 @@ Each transaction returns a hash that can be debugged.
 
 ### 3. Debug a Transaction
 
-#### Method 1: Trace
-
 ```bash
-./walnut-cli.py 0x123... --ethdebug-dir ./debug/ethdebug_output
+# Debug with ETHDebug information
+./walnut-cli.py 0x123... --ethdebug-dir ./debug
+
+# Or if walnut.config.yaml is configured correctly
+./walnut-cli.py 0x123...
+
+# Show raw execution trace
+./walnut-cli.py 0x123... --raw
 ```
 
 This shows a high-level function call trace with gas usage and source mappings.
-
-#### Method 2: Interactive REPL
-
-TBD
 
 ## Debug Information Formats
 
 ### ETHDebug Format
 
-This approach is to use the standard ethdebug format from the Solidity compiler:
+This approach is to use the standard ethdebug format from the Solidity compiler (requires Solidity 0.8.29+):
 
 1. **Generate ethdebug information**:
    ```bash
+   # Requires solc 0.8.29 or higher
    solc --via-ir --debug-info ethdebug --ethdebug -o /tmp/ethdebug-output MyContract.sol
    ```
    This generates:
@@ -198,9 +196,11 @@ This approach is to use the standard ethdebug format from the Solidity compiler:
 
 ### Other formats
 
-TBD (e.g. DWARF, and LLVM Debug Info Metadata)
+Currently, walnut-cli supports the standard ETHDebug format. Additional formats may be added in the future.
 
 ## Debugging Workflow
+
+### Using Helper Scripts (Recommended)
 
 1. **Write your contract**:
    ```solidity
@@ -220,14 +220,12 @@ TBD (e.g. DWARF, and LLVM Debug Info Metadata)
 
 2. **Deploy with debug info**:
    ```bash
-   # With solc (ethdebug format - recommended)
    ./scripts/deploy-contract.sh Counter src/Counter.sol
    
    # Output:
-   # Using solc compiler with ethdebug format (recommended)
    # Transaction: 0x123...
    # Contract deployed at: 0xabc...
-   # ETHDebug files created in: debug/ethdebug_output   
+   # ETHDebug files created in: debug/
    ```
 
 3. **Interact and get transaction hash**:
@@ -238,14 +236,67 @@ TBD (e.g. DWARF, and LLVM Debug Info Metadata)
 
 4. **Debug the transaction**:
    ```bash
-   ./walnut-cli.py 0x123... --ethdebug-dir ./debug/ethdebug_output
+   ./walnut-cli.py 0x123... --ethdebug-dir ./debug
    # Shows function call trace with proper function names
    ```
+
+### Manual Workflow (Without Scripts)
+
+If you prefer to compile, deploy, and interact manually:
+
+1. **Compile with ETHDebug support**:
+   ```bash
+   # Create debug directory
+   mkdir -p debug
+   
+   # Compile with ETHDebug (requires solc 0.8.29+)
+   solc --via-ir --debug-info ethdebug --ethdebug --ethdebug-runtime \
+        --bin --abi --overwrite -o debug \
+        examples/TestContract.sol
+   ```
+
+2. **Deploy using cast (Foundry)**:
+   ```bash
+   # Get the bytecode
+   BYTECODE=$(cat debug/TestContract.bin)
+   
+   # Deploy (using Anvil's default account)
+   cast send --rpc-url http://localhost:8545 \
+             --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+             --create "0x$BYTECODE" \
+             --json
+   
+   # Note the contractAddress from the output
+   ```
+
+3. **Interact with the contract**:
+   ```bash
+   # Call a function (e.g., increment with value 5)
+   # Replace CONTRACT_ADDRESS with your deployed address
+   cast send CONTRACT_ADDRESS "increment(uint256)" 5 \
+        --rpc-url http://localhost:8545 \
+        --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+        --json
+   
+   # Note the transactionHash from the output
+   ```
+
+4. **Debug the transaction**:
+   ```bash
+   # Use the transaction hash from step 3
+   ./walnut-cli.py 0xYOUR_TX_HASH --ethdebug-dir ./debug
+   ```
+
+### Reading contract state (view functions):
+```bash
+# Read public variables or view functions
+cast call CONTRACT_ADDRESS "counter()(uint256)" --rpc-url http://localhost:8545
+```
 
 ## Example Output
 
 ```
-walnut-cli.py 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994 --ethdebug-dir tmp/ethdebug_output --rpc http://localhost:8547
+walnut-cli.py 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994 --ethdebug-dir debug --rpc http://localhost:8545
 Loading transaction 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994...
 Loaded 1833 PC mappings from ethdebug
 Contract: TestContract
@@ -270,7 +321,7 @@ Use --raw flag to see detailed instruction trace
 
 The raw output:
 ```
-$ ./walnut-cli.py 0x123...abc --ethdebug-dir /tmp/ethdebug-output --raw
+$ ./walnut-cli.py 0x123...abc --ethdebug-dir debug --raw
 
 Loaded 300 PC mappings from ethdebug
 Contract: HelloWorld
@@ -299,7 +350,7 @@ cd test
 ./run-tests.sh SOLC_PATH=/path/to/solc
 ```
 
-It expects RPC at `http://localhost:8547` and uses `0xb6b15c8cb491557369f3c7d2c287b053eb229daa9c22138887752191c9520659` key by default.
+It expects RPC at `http://localhost:8545` (Anvil default) and uses Anvil's test account private key by default.
 Also, it uses LLVM's `lit` and `FileCheck` tools, so please install it.
 
 ## License

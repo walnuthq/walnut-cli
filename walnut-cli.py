@@ -5,7 +5,6 @@ Trace and debug an Ethereum transaction
 Usage: walnut-cli.py <tx_hash> [options]
 
 Options:
-  --debug-info-from-zasm-file <file>  Load debug info from .zasm file
   --ethdebug-dir <dir>                Load ethdebug format from directory
   --rpc <url>                         RPC endpoint (default: http://localhost:8545)
 """
@@ -46,7 +45,7 @@ def find_debug_file(contract_addr: str) -> str:
 def main():
     parser = argparse.ArgumentParser(description='Trace and debug an Ethereum transaction')
     parser.add_argument('tx_hash', help='Transaction hash to trace')
-    parser.add_argument('--debug-info-from-zasm-file', '-d', help='Load debug info from .zasm file (solx/evm-dwarf format)')
+    # parser.add_argument('--debug-info-from-zasm-file', '-d', help='Load debug info from .zasm file (solx/evm-dwarf format)')
     parser.add_argument('--ethdebug-dir', '-e', help='ETHDebug directory containing ethdebug.json and contract debug files')
     parser.add_argument('--rpc', '-r', default='http://localhost:8545', help='RPC URL')
     parser.add_argument('--max-steps', '-m', type=int, default=50, help='Maximum steps to show (use 0 or -1 for all steps)')
@@ -63,7 +62,7 @@ def main():
     trace = tracer.trace_transaction(args.tx_hash)
     
     # Try to find debug file if not provided
-    debug_file = args.debug_info_from_zasm_file
+    debug_file = getattr(args, 'debug_info_from_zasm_file', None)
     if not debug_file:
         # For deployment transactions, check deployment.json
         if not trace.to_addr:  # Deployment transaction

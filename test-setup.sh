@@ -34,30 +34,21 @@ fi
 
 echo
 
-# Test solx
-echo -n "Testing solx... "
-if [ -n "$SOLX_PATH" ] && [ -x "$SOLX_PATH" ]; then
-    if "$SOLX_PATH" --version > /dev/null 2>&1; then
-        VERSION=$("$SOLX_PATH" --version 2>&1 | head -1)
-        echo -e "${GREEN}✓ OK${NC} ($VERSION)"
+# Test Solidity compiler
+echo -n "Testing solc... "
+if [ -n "$SOLC_PATH" ] && [ -x "$SOLC_PATH" ]; then
+    if "$SOLC_PATH" --version > /dev/null 2>&1; then
+        VERSION=$("$SOLC_PATH" --version | grep -oE 'Version: [0-9]+\.[0-9]+\.[0-9]+' | cut -d' ' -f2)
+        echo -e "${GREEN}✓ OK${NC} (version $VERSION)"
     else
         echo -e "${RED}✗ Failed to run${NC}"
     fi
+elif command -v solc &> /dev/null; then
+    VERSION=$(solc --version | grep -oE 'Version: [0-9]+\.[0-9]+\.[0-9]+' | cut -d' ' -f2)
+    echo -e "${GREEN}✓ OK${NC} (version $VERSION from PATH)"
 else
-    echo -e "${RED}✗ Not found or not executable${NC}"
-    echo "  Path: $SOLX_PATH"
-fi
-
-# Test evm-dwarf (formerly evm-debug)
-echo -n "Testing evm-dwarf... "
-if [ -n "$EVM_DEBUG_PATH" ] && [ -x "$EVM_DEBUG_PATH" ]; then
-    if "$EVM_DEBUG_PATH" --help > /dev/null 2>&1; then
-        echo -e "${GREEN}✓ OK${NC}"
-    else
-        echo -e "${RED}✗ Failed to run${NC}"
-    fi
-else
-    echo -e "${YELLOW}⚠ Not configured${NC} (optional)"
+    echo -e "${YELLOW}⚠ Not configured${NC}"
+    echo "  You can specify a custom solc with --solc flag when deploying"
 fi
 
 # Test RPC connection
@@ -70,7 +61,8 @@ if curl -s -X POST -H "Content-Type: application/json" \
         "$RPC_URL" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
     echo -e "${GREEN}✓ OK${NC} (block: $BLOCK)"
 else
-    echo -e "${YELLOW}⚠ Failed${NC} (node may be offline)"
+    echo -e "${YELLOW}⚠ Failed${NC}"
+    echo "  Make sure Anvil is running: anvil --fork-url <RPC> --steps-tracing"
 fi
 
 # Test Python dependencies
@@ -94,18 +86,20 @@ fi
 
 echo
 echo -e "${BLUE}Configuration Summary:${NC}"
-echo "  SOLX_PATH=$SOLX_PATH"
-echo "  EVM_DEBUG_PATH=$EVM_DEBUG_PATH"
+echo "  SOLC_PATH=${SOLC_PATH:-"(will use system solc)"}"
 echo "  RPC_URL=$RPC_URL"
 echo "  DEBUG_DIR=$DEBUG_DIR"
 
 echo
 echo -e "${BLUE}Next steps:${NC}"
-echo "1. Deploy a contract:"
-echo "   ./scripts/deploy-contract.sh Counter src/Counter.sol"
+echo "1. Start Anvil with tracing:"
+echo "   anvil --fork-url <YOUR_RPC> --steps-tracing"
 echo
-echo "2. Interact with contract:"
-echo "   ./scripts/interact-contract.sh set 42"
+echo "2. Deploy a contract:"
+echo "   ./scripts/deploy-contract.sh TestContract examples/TestContract.sol"
 echo
-echo "3. Debug a transaction:"
-echo "   ./walnut-cli.py <tx_hash> --interactive"
+echo "3. Interact with contract:"
+echo "   ./scripts/interact-contract.sh increment 5"
+echo
+echo "4. Debug a transaction:"
+echo "   ./walnut-cli.py <tx_hash>"
