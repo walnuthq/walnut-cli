@@ -567,9 +567,11 @@ class TraceSerializer:
             root_trace_call["to"] = trace.to_addr
             root_trace_call["gas"] = trace.steps[0].gas if trace.steps else 0
             root_trace_call["gasUsed"] = trace.gas_used
-            # Handle input data
-            if isinstance(trace.input_data, (bytes, HexBytes)):
-                root_trace_call["input"] = self.encode_function_input(root_calls[0], trace)
+            # Handle input data - for root call, always use the full transaction input data
+            if isinstance(trace.input_data, bytes):
+                root_trace_call["input"] = '0x' + trace.input_data.hex()
+            elif isinstance(trace.input_data, HexBytes):
+                root_trace_call["input"] = trace.input_data.hex()
             else:
                 root_trace_call["input"] = trace.input_data
             # Handle output
