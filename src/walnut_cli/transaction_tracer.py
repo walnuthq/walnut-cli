@@ -552,6 +552,24 @@ class TransactionTracer:
         if not show_all and len(trace.steps) > max_steps:
             print(dim(f"... {len(trace.steps) - max_steps} more steps ..."))
     
+    def format_abi_type(self, abi_input: Dict[str, Any]) -> str:
+        """Format ABI type, handling tuples correctly."""
+        if abi_input['type'] == 'tuple':
+            # Build tuple signature from components
+            components = abi_input.get('components', [])
+            component_types = [self.format_abi_type(comp) for comp in components]
+            return f"({','.join(component_types)})"
+        elif abi_input['type'].endswith('[]'):
+            # Array type
+            base_type = abi_input['type'][:-2]
+            if base_type == 'tuple':
+                components = abi_input.get('components', [])
+                component_types = [self.format_abi_type(comp) for comp in components]
+                return f"({','.join(component_types)})[]"
+            return abi_input['type']
+        else:
+            return abi_input['type']
+    
     def load_abi(self, abi_path: str):
         """Load ABI and extract function signatures."""
         try:
@@ -562,8 +580,8 @@ class TransactionTracer:
                 if item.get('type') == 'function':
                     name = item['name']
                     inputs = item.get('inputs', [])
-                    # Build function signature
-                    input_types = ','.join([inp['type'] for inp in inputs])
+                    # Build function signature with proper tuple formatting
+                    input_types = ','.join([self.format_abi_type(inp) for inp in inputs])
                     signature = f"{name}({input_types})"
                     # Calculate selector (first 4 bytes of keccak256 hash)
                     selector_bytes = self.w3.keccak(text=signature)[:4]
@@ -603,7 +621,7 @@ class TransactionTracer:
         return None
     
     def decode_function_parameters(self, selector: str, calldata: str) -> List[Tuple[str, Any]]:
-        """Decode function parameters from calldata."""
+        """Decode function parameters from calldata using ABI."""
         params = []
         
         if selector not in self.function_abis:
@@ -616,45 +634,110 @@ class TransactionTracer:
             return params
         
         try:
-            # Remove selector from calldata (first 10 chars including 0x)
+            # Remove selector from calldata
             if isinstance(calldata, str):
-                param_data = calldata[10:]  # Skip 0x + 8 hex chars
-            else:
-                param_data = calldata.hex()[8:]  # Skip 8 hex chars if bytes
-            
-            # Decode parameters (each uint256 is 64 hex chars)
-            offset = 0
-            for inp in inputs:
-                param_name = inp.get('name', f'param{len(params)}')
-                param_type = inp['type']
-                
-                if param_type == 'uint256':
-                    # Extract 32 bytes (64 hex chars)
-                    hex_value = param_data[offset:offset+64]
-                    if hex_value:
-                        value = int(hex_value, 16)
-                        params.append((param_name, value))
-                    offset += 64
-                elif param_type == 'address':
-                    # Extract 20 bytes (40 hex chars) with padding
-                    hex_value = param_data[offset+24:offset+64]  # Skip 12 bytes of padding
-                    if hex_value:
-                        try:
-                            value = to_checksum_address('0x' + hex_value)
-                        except:
-                            value = '0x' + hex_value
-                        params.append((param_name, value))
-                    offset += 64
+                if calldata.startswith('0x'):
+                    param_data_hex = calldata[10:]  # Skip 0x + 8 hex chars (selector)
                 else:
-                    # For other types, show raw hex for now
-                    hex_value = param_data[offset:offset+64]
-                    params.append((param_name, f"0x{hex_value}"))
-                    offset += 64
+                    param_data_hex = calldata[8:]  # Skip 8 hex chars (selector)
+            else:
+                param_data_hex = calldata.hex()[8:]  # Skip 8 hex chars if bytes
+            
+            # Convert hex string to bytes for eth_abi
+            param_data_bytes = bytes.fromhex(param_data_hex)
+            
+            # Use eth_abi to decode parameters
+            from eth_abi import decode
+            
+            # Build the type list for decoding
+            type_list = []
+            for inp in inputs:
+                if inp['type'] == 'tuple':
+                    # Build tuple type string
+                    type_list.append(self.format_abi_type(inp))
+                else:
+                    type_list.append(inp['type'])
+            
+            # Decode all parameters at once
+            if param_data_bytes:
+                decoded_values = decode(type_list, param_data_bytes)
+                
+                # Format the decoded values nicely
+                for i, (inp, value) in enumerate(zip(inputs, decoded_values)):
+                    param_name = inp.get('name', f'param{i}')
+                    param_type = inp['type']
                     
+                    if param_type == 'tuple' and inp.get('components'):
+                        # Format tuple as a nice string representation
+                        formatted_value = self.format_tuple_value(value, inp['components'])
+                        params.append((param_name, formatted_value))
+                    elif param_type == 'address':
+                        # Convert to checksum address
+                        try:
+                            params.append((param_name, to_checksum_address(value)))
+                        except:
+                            params.append((param_name, value))
+                    elif param_type == 'bytes' or param_type.startswith('bytes'):
+                        # Convert bytes to hex
+                        if isinstance(value, bytes):
+                            params.append((param_name, '0x' + value.hex()))
+                        else:
+                            params.append((param_name, value))
+                    else:
+                        params.append((param_name, value))
+            
         except Exception as e:
-            print(f"Warning: Could not decode parameters: {e}")
+            print(f"Warning: Could not decode parameters with eth_abi, falling back to raw decoding: {e}")
+            # Fallback to simple raw decoding
+            try:
+                offset = 0
+                for inp in inputs:
+                    param_name = inp.get('name', f'param{len(params)}')
+                    param_type = inp['type']
+                    
+                    if offset + 64 <= len(param_data_hex):
+                        hex_value = param_data_hex[offset:offset+64]
+                        if param_type == 'uint256':
+                            value = int(hex_value, 16)
+                            params.append((param_name, value))
+                        elif param_type == 'address':
+                            addr_hex = hex_value[24:]  # Last 20 bytes
+                            params.append((param_name, '0x' + addr_hex))
+                        else:
+                            params.append((param_name, f"0x{hex_value}"))
+                        offset += 64
+                    else:
+                        break
+            except Exception as e2:
+                print(f"Warning: Fallback decoding also failed: {e2}")
         
         return params
+    
+    def format_tuple_value(self, value: tuple, components: List[Dict[str, Any]]) -> str:
+        """Format a tuple value into a readable string."""
+        if not components:
+            return str(value)
+        
+        parts = []
+        for i, (component, val) in enumerate(zip(components, value)):
+            name = component.get('name', f'field{i}')
+            comp_type = component['type']
+            
+            if comp_type == 'string':
+                parts.append(f"{name}={repr(val)}")
+            elif comp_type == 'address':
+                try:
+                    formatted_addr = to_checksum_address(val)
+                    parts.append(f"{name}={formatted_addr}")
+                except:
+                    parts.append(f"{name}={val}")
+            elif comp_type == 'tuple' and component.get('components'):
+                nested_formatted = self.format_tuple_value(val, component['components'])
+                parts.append(f"{name}={nested_formatted}")
+            else:
+                parts.append(f"{name}={val}")
+        
+        return f"({', '.join(parts)})"
     
     def analyze_calling_pattern(self, trace: TransactionTrace, function_step: int, 
                                func_name: str) -> Dict[str, int]:
