@@ -43,13 +43,15 @@ contract TestContract {
         uint256 oldValue = counter;
         counter += amount;
         
-        increment3(amount);
+        amount += 1;
+
+        increment3(amount, counter);
 
         emit CounterIncremented(counter);
     }
 
 
-    function increment3(uint256 amount) public {
+    function increment3(uint256 amount, uint256 amount2) public {
         require(amount > 0, "Amount must be positive");
         
         // This is where we might set a breakpoint
