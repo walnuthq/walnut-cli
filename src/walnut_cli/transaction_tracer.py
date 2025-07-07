@@ -1422,7 +1422,10 @@ class TransactionTracer:
                 while call_stack:
                     call = call_stack.pop()
                     call.exit_step = i
-                    call.gas_used = trace.steps[call.entry_step].gas - step.gas
+                    if call.entry_step < len(trace.steps):
+                        call.gas_used = trace.steps[call.entry_step].gas - step.gas
+                    else:
+                        call.gas_used = 0
                     
                     if call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
                         if context_stack:
@@ -1443,8 +1446,11 @@ class TransactionTracer:
             
          
         for call in call_stack:
-            call.exit_step = len(trace.steps) - 1
-            call.gas_used = trace.steps[call.entry_step].gas - trace.steps[-1].gas
+            call.exit_step = len(trace.steps) - 1 if trace.steps else 0
+            if trace.steps and call.entry_step < len(trace.steps):
+                call.gas_used = trace.steps[call.entry_step].gas - trace.steps[-1].gas
+            else:
+                call.gas_used = 0
             
         # Handle the main entry function specially
         if main_selector:
