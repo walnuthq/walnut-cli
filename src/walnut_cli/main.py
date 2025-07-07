@@ -15,6 +15,7 @@ from .evm_repl import EVMDebugger
 from .abi_utils import match_abi_types, match_single_type, parse_signature, parse_tuple_arg
 from .multi_contract_ethdebug_parser import MultiContractETHDebugParser
 from .json_serializer import TraceSerializer
+from .colors import error
 
 
 def find_debug_file(contract_addr: str) -> str:
@@ -49,6 +50,31 @@ def trace_command(args):
         print(f"Loading transaction {args.tx_hash}...")
         sys.stdout.flush()  # Ensure output order
     trace = tracer.trace_transaction(args.tx_hash)
+    
+    # Check if debug trace is available
+    if not trace.debug_trace_available:
+        if args.json:
+            # Output minimal JSON with error
+            json_output = {
+                "walnutCLIFailed": "debug_traceTransaction unavailable",
+                "tx_hash": trace.tx_hash,
+                "from": trace.from_addr,
+                "to": trace.to_addr,
+                "gas_used": trace.gas_used,
+                "status": "SUCCESS" if trace.success else "REVERTED",
+                "error": trace.error
+            }
+            print(json.dumps(json_output, indent=2))
+        else:
+            print(f"\n{error('Error: debug_traceTransaction not available')}")
+            print(f"The RPC endpoint returned: {trace.error or 'execution timeout'}")
+            print(f"\nTransaction details:")
+            print(f"  Hash: {trace.tx_hash}")
+            print(f"  From: {trace.from_addr}")
+            print(f"  To: {trace.to_addr}")
+            print(f"  Gas used: {trace.gas_used}")
+            print(f"  Status: {'SUCCESS' if trace.success else 'REVERTED'}")
+        return 1
     
     # Try to find debug file if not provided
     debug_file = getattr(args, 'debug_info_from_zasm_file', None)

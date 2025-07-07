@@ -95,6 +95,7 @@ class TransactionTrace:
     steps: List[TraceStep]
     success: bool
     error: Optional[str] = None
+    debug_trace_available: bool = True
 
 
 class TransactionTracer:
@@ -373,13 +374,18 @@ class TransactionTracer:
         tx = self.w3.eth.get_transaction(tx_hash)
         
         # Use debug_traceTransaction if available
+        debug_trace_available = True
+        debug_error = None
         try:
             trace_result = self.w3.manager.request_blocking(
                 "debug_traceTransaction",
                 [tx_hash, {"disableStorage": False, "disableMemory": False, "enableMemory": True}]
             )
         except Exception as e:
-            print(f"debug_traceTransaction not available: {e}")
+            debug_trace_available = False
+            debug_error = str(e)
+            if not self.quiet_mode:
+                print(f"debug_traceTransaction not available: {e}")
             # Fallback to basic trace
             trace_result = self._basic_trace(tx_hash)
         
@@ -429,7 +435,8 @@ class TransactionTracer:
             output=trace_result.get('returnValue', '0x'),
             steps=steps,
             success=receipt['status'] == 1,
-            error=error_msg
+            error=error_msg if error_msg else debug_error,
+            debug_trace_available=debug_trace_available
         )
     
     def simulate_call_trace(self, to, from_, calldata, block, tx_index=None, value = 0):
