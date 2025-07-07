@@ -1660,8 +1660,6 @@ class TransactionTracer:
 
         # Extract call parameters
         to_addr = self.extract_address_from_stack(step.stack[-2])
-        value = int(step.stack[-3], 16) if step.op == "CALL" else 0
-        gas = int(step.stack[-1], 16)
         calldata = self.extract_calldata_from_step(step)
 
         # Get contract name if available
@@ -1672,7 +1670,6 @@ class TransactionTracer:
                 contract_name = contract_info.name
 
         # Try to decode function signature
-        func_name = "unknown"
         decoded_params = []
         selector = None
         
@@ -1685,11 +1682,13 @@ class TransactionTracer:
             else:
                 # Try 4byte directory lookup
                 func_name = self.lookup_function_signature(selector) or f"function_{selector}"
-                # For unknown functions, just show raw CALL parameters
-                decoded_params = [("to", to_addr), ("value", value), ("gas", gas)]
+                # For unknown functions, return empty decoded_params
+                decoded_params = []
         else:
-            # No calldata, show CALL parameters
-            decoded_params = [("to", to_addr), ("value", value), ("gas", gas)]
+            # No calldata, show empty selector instead of unknown
+            func_name = "function_0x"
+            # Return empty decoded_params
+            decoded_params = []
 
         return FunctionCall(
             name=f"{step.op} → {contract_name}::{func_name}",
