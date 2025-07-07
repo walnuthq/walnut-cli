@@ -22,10 +22,15 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
     prompt = f'{cyan("(walnut-cli)")} '
     
     def __init__(self, contract_address: str = None, debug_file: str = None, 
-                 rpc_url: str = "http://localhost:8545", ethdebug_dir: str = None):
+                 rpc_url: str = "http://localhost:8545", ethdebug_dir: str = None,
+                 multi_contract_parser = None):
         super().__init__()
         
         self.tracer = TransactionTracer(rpc_url)
+        
+        # Set multi-contract parser if provided
+        if multi_contract_parser:
+            self.tracer.multi_contract_parser = multi_contract_parser
         self.current_trace = None
         self.current_step = 0
         self.breakpoints = set()

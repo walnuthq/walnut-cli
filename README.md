@@ -162,16 +162,85 @@ Each transaction returns a hash that can be debugged.
 
 ```bash
 # Debug with ETHDebug information
-./walnut-cli.py trace 0x123... --ethdebug-dir ./debug
+walnut-cli trace 0x123... --ethdebug-dir ./debug
 
 # Or if walnut.config.yaml is configured correctly
-./walnut-cli.py trace 0x123...
+walnut-cli trace 0x123...
 
 # Show raw execution trace
-./walnut-cli.py trace 0x123... --raw
+walnut-cli trace 0x123... --raw
 ```
 
 This shows a high-level function call trace with gas usage and source mappings.
+
+### 4. Debug Multi-Contract Transactions
+
+Walnut-cli supports debugging transactions that involve multiple contracts, providing seamless source-level debugging across contract boundaries.
+
+#### Loading Multiple Contracts
+
+**Option 1: Multiple debug directories**
+```bash
+# Auto-detect contracts from deployment.json files
+walnut-cli trace 0x123... \
+    --ethdebug-dir ./debug_controller \
+    --ethdebug-dir ./debug_counter
+
+# Specify address:path mapping
+walnut-cli trace 0x123... \
+    --ethdebug-dir 0x44c4...9d64:./debug_controller \
+    --ethdebug-dir 0x82e8...43fb:./debug_counter
+```
+
+**Option 2: Contract mapping file**
+```bash
+# Create a mapping file
+cat > contracts.json << EOF
+{
+  "contracts": [
+    {
+      "address": "0x44c4caf8f075607deadf02dc7bf7f0166a209d64",
+      "name": "Controller",
+      "debug_dir": "./debug_controller"
+    },
+    {
+      "address": "0x82e8f00d62fa200af7cfcc8f072ae0525e1a43fb",
+      "name": "Counter",
+      "debug_dir": "./debug_counter"
+    }
+  ]
+}
+EOF
+
+# Use the mapping file
+walnut-cli trace 0x123... --contracts contracts.json
+```
+
+**Option 3: Enable multi-contract mode**
+```bash
+walnut-cli trace 0x123... --multi-contract --ethdebug-dir ./debug/
+```
+
+#### Multi-Contract Output
+
+When debugging multi-contract transactions, you'll see enhanced output:
+
+```
+Function Call Trace: 0x123...
+Loaded contracts:
+  Controller (0x44c4caf8f075607deadf02dc7bf7f0166a209d64)
+  Counter (0x82e8f00d62fa200af7cfcc8f072ae0525e1a43fb)
+Gas used: 72000
+
+Call Stack:
+------------------------------------------------------------
+#0 Controller::runtime_dispatcher [entry] gas: 72000 @ Controller.sol:1
+  #1 Controller::callIncrement [internal] gas: 65000 @ Controller.sol:15
+    #2 call_to_Counter (0x82e8...43fb) [CALL → Counter] gas: 50000
+      #3 Counter::increment [internal] gas: 45000 @ Counter.sol:8
+        #4 Counter::_updateValue [internal] gas: 20000 @ Counter.sol:20
+------------------------------------------------------------
+```
 
 ## Debug Information Formats
 
@@ -191,12 +260,23 @@ This approach is to use the standard ethdebug format from the Solidity compiler 
 
 2. **Trace transactions with ethdebug**:
    ```bash
-   ./walnut-cli.py trace 0x123...abc --ethdebug-dir /tmp/ethdebug-output
+   walnut-cli trace 0x123...abc --ethdebug-dir /tmp/ethdebug-output
    ```
 
 ### Other formats
 
 Currently, walnut-cli supports the standard ETHDebug format. Additional formats may be added in the future.
+
+### Using walnut-cli after installation
+
+After running `pip install -e .`, you can use walnut-cli directly from anywhere:
+
+```bash
+# The commands are available globally
+walnut-cli trace 0x123...
+walnut trace 0x123...  # Short alias
+walnut-setup          # Setup wizard
+```
 
 ## Debugging Workflow
 
@@ -236,7 +316,7 @@ Currently, walnut-cli supports the standard ETHDebug format. Additional formats 
 
 4. **Debug the transaction**:
    ```bash
-   ./walnut-cli.py trace 0x123... --ethdebug-dir ./debug
+   walnut-cli trace 0x123... --ethdebug-dir ./debug
    # Shows function call trace with proper function names
    ```
 
@@ -284,7 +364,7 @@ If you prefer to compile, deploy, and interact manually:
 4. **Debug the transaction**:
    ```bash
    # Use the transaction hash from step 3
-   ./walnut-cli.py trace 0xYOUR_TX_HASH --ethdebug-dir ./debug
+   walnut-cli trace 0xYOUR_TX_HASH --ethdebug-dir ./debug
    ```
 
 ### Reading contract state (view functions):
@@ -296,7 +376,7 @@ cast call CONTRACT_ADDRESS "counter()(uint256)" --rpc-url http://localhost:8545
 ## Example Output
 
 ```
-walnut-cli.py trace 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994 --ethdebug-dir debug --rpc http://localhost:8545
+walnut-cli trace 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994 --ethdebug-dir debug --rpc http://localhost:8545
 Loading transaction 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994...
 Loaded 1833 PC mappings from ethdebug
 Contract: TestContract
@@ -322,7 +402,7 @@ Use --raw flag to see detailed instruction trace
 
 The raw output:
 ```
-$ ./walnut-cli.py trace 0x123...abc --ethdebug-dir debug --raw
+$ walnut-cli trace 0x123...abc --ethdebug-dir debug --raw
 
 Loaded 300 PC mappings from ethdebug
 Contract: HelloWorld

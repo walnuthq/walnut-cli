@@ -13,6 +13,7 @@ from web3 import Web3
 from eth_utils import to_hex, to_checksum_address
 from .colors import *
 from .ethdebug_parser import ETHDebugParser, ETHDebugInfo
+from .multi_contract_ethdebug_parser import MultiContractETHDebugParser, ExecutionContext
 import re
 import requests
 
@@ -102,6 +103,7 @@ class TransactionTracer:
         self.contracts = {}
         self.ethdebug_parser = ETHDebugParser()
         self.ethdebug_info: Optional[ETHDebugInfo] = None
+        self.multi_contract_parser: Optional[MultiContractETHDebugParser] = None
         self.function_signatures = {}  # selector -> function name
         self.function_abis = {}  # selector -> full ABI item
         self.function_params = {}  # function name -> parameter info
@@ -175,6 +177,149 @@ class TransactionTracer:
         except Exception as e:
             print(f"Warning: Failed to load ethdebug info: {e}")
             return {}
+    
+    def get_source_context_for_step(self, step: TraceStep, address: Optional[str] = None, context_lines: int = 2) -> Optional[Dict[str, Any]]:
+        """Get source context for a step, handling multi-contract scenarios."""
+        if self.multi_contract_parser and address:
+            # Multi-contract mode: get context from specific contract
+            return self.multi_contract_parser.get_source_info_for_address(address, step.pc)
+        elif self.ethdebug_parser and self.ethdebug_info:
+            # Single contract mode
+            return self.ethdebug_parser.get_source_context(step.pc, context_lines)
+        return None
+    
+    def get_current_contract_address(self, trace: TransactionTrace, step_index: int) -> str:
+        """Determine the current contract address at a given step."""
+        # For now, use the transaction's to address
+        # In future, this should track CALL/DELEGATECALL targets
+        if self.multi_contract_parser:
+            context = self.multi_contract_parser.get_current_context()
+            if context:
+                return context.address
+        return trace.to_addr
+    
+    def detect_executing_contract(self, trace: TransactionTrace, step_index: int) -> Optional[str]:
+        """Detect which contract is executing at a given step by analyzing the bytecode.
+        
+        This is used to handle --via-ir optimized contracts where the CALL target
+        address might be encoded differently.
+        """
+        if not self.multi_contract_parser:
+            return None
+            
+        # Get the current step
+        if step_index >= len(trace.steps):
+            return None
+            
+        step = trace.steps[step_index]
+        
+        # Try to match the PC with loaded contracts
+        for addr, contract_info in self.multi_contract_parser.contracts.items():
+            # Check if this PC exists in the contract's debug info
+            if contract_info.ethdebug_info:
+                # Try to get source info for this PC
+                try:
+                    source_info = contract_info.parser.get_source_context(step.pc, context_lines=0)
+                    if source_info:
+                        # Found a match!
+                        return addr
+                except:
+                    continue
+        
+        # If no match found, return None
+        return None
+    
+    def extract_address_from_stack(self, stack_value: str) -> str:
+        """Extract and properly format an address from a stack value."""
+        # Remove 0x prefix if present
+        if stack_value.startswith('0x'):
+            stack_value = stack_value[2:]
+        
+        # Stack values should be 32 bytes (64 hex chars)
+        # Pad to full 32 bytes if shorter
+        stack_value = stack_value.zfill(64)
+        
+        # Extract last 40 hex chars (20 bytes) for the address
+        addr_hex = stack_value[-40:]
+        try:
+            return to_checksum_address('0x' + addr_hex)
+        except:
+            return '0x' + addr_hex
+    
+    def extract_address_from_memory(self, memory: str, offset: int) -> Optional[str]:
+        """Extract an address from memory at the given offset.
+        
+        Args:
+            memory: The memory as a hex string (without 0x prefix)
+            offset: The byte offset in memory where the address is stored
+            
+        Returns:
+            The extracted address or None if extraction fails
+        """
+        try:
+            # Memory is a continuous hex string, 2 chars per byte
+            # Skip to the offset (multiply by 2 for hex chars)
+            start_pos = offset * 2
+            
+            # We need 32 bytes (64 hex chars) for a full word
+            if start_pos + 64 > len(memory):
+                return None
+                
+            # Extract 32 bytes from memory
+            word = memory[start_pos:start_pos + 64]
+            
+            # Extract address from the word (last 20 bytes / 40 hex chars)
+            addr_hex = word[-40:]
+            
+            # Validate it's not all zeros or obviously invalid
+            if addr_hex == '0' * 40:
+                return None
+                
+            try:
+                return to_checksum_address('0x' + addr_hex)
+            except:
+                return '0x' + addr_hex
+                
+        except Exception as e:
+            print(f"Warning: Failed to extract address from memory at offset {offset}: {e}")
+            return None
+    
+    def is_likely_memory_offset(self, value: str) -> bool:
+        """Check if a stack value is likely a memory offset rather than an address.
+        
+        Memory offsets used by --via-ir are typically small values (< 0x1000).
+        """
+        try:
+            int_val = int(value, 16) if value.startswith('0x') else int(value, 16)
+            # Memory offsets are typically small (less than 4KB)
+            # Real addresses are much larger (have significant upper bytes)
+            return int_val < 0x1000
+        except:
+            return False
+    
+    def format_address_display(self, address: str, short: bool = True) -> str:
+        """Format an address for display, optionally with contract name."""
+        if not address:
+            return "<unknown>"
+        
+        # Try to get contract name if in multi-contract mode
+        contract_name = None
+        if self.multi_contract_parser:
+            contract_info = self.multi_contract_parser.get_contract_at_address(address)
+            if contract_info:
+                contract_name = contract_info.name
+        
+        # Format address display
+        if short and len(address) > 10:
+            # Show first 6 and last 4 chars: 0x1234...5678
+            addr_display = f"{address[:6]}...{address[-4:]}"
+        else:
+            addr_display = address
+        
+        # Add contract name if available
+        if contract_name:
+            return f"{contract_name} ({addr_display})"
+        return addr_display
     
     def trace_transaction(self, tx_hash: str) -> TransactionTrace:
         """Trace a transaction execution."""
@@ -265,15 +410,21 @@ class TransactionTracer:
         return trace
     
     def format_trace_step(self, step: TraceStep, source_map: Dict[int, Tuple[str, int]], 
-                         step_num: int, total_steps: int) -> str:
+                         step_num: int, total_steps: int, trace: Optional[TransactionTrace] = None, 
+                         step_index: Optional[int] = None) -> str:
         """Format a single trace step for display."""
         # Get source location
         source_loc = source_map.get(step.pc, (0, 0))
         source_str = ""
         
         # If we have ethdebug info, use it for better source mapping
-        if self.ethdebug_info:
-            context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
+        if self.ethdebug_info or self.multi_contract_parser:
+            # Determine current contract address if in multi-contract mode
+            address = None
+            if self.multi_contract_parser and trace and step_index is not None:
+                address = self.get_current_contract_address(trace, step_index)
+            
+            context = self.get_source_context_for_step(step, address, context_lines=0)
             if context:
                 source_str = info(f"{os.path.basename(context['file'])}:{context['line']}:{context['column']}")
         elif source_loc[1] > 0:
@@ -329,7 +480,7 @@ class TransactionTracer:
         
         # Show the requested number of steps
         for i in range(steps_to_show):
-            print(self.format_trace_step(trace.steps[i], source_map, i, len(trace.steps)))
+            print(self.format_trace_step(trace.steps[i], source_map, i, len(trace.steps), trace, i))
         
         # Show summary if not all steps were displayed
         if not show_all and len(trace.steps) > max_steps:
@@ -422,7 +573,10 @@ class TransactionTracer:
                     # Extract 20 bytes (40 hex chars) with padding
                     hex_value = param_data[offset+24:offset+64]  # Skip 12 bytes of padding
                     if hex_value:
-                        value = '0x' + hex_value
+                        try:
+                            value = to_checksum_address('0x' + hex_value)
+                        except:
+                            value = '0x' + hex_value
                         params.append((param_name, value))
                     offset += 64
                 else:
@@ -799,6 +953,11 @@ class TransactionTracer:
         function_calls = []
         call_stack = []  # Track active function calls
         
+        # Initialize execution context for entry contract in multi-contract mode
+        if self.multi_contract_parser and trace.to_addr:
+            # Push the entry contract's context onto the execution stack
+            self.multi_contract_parser.push_context(trace.to_addr, "ENTRY")
+        
         # Extract function selector from transaction input data
         main_selector = None
         if trace.input_data and len(trace.input_data) >= 10:  # 0x + 8 hex chars
@@ -824,11 +983,13 @@ class TransactionTracer:
                 function_pcs[pc] = func_info['name']
         
         # First pass: identify all function entry points using source mappings
-        if self.ethdebug_info and not ethdebug_boundaries:
+        if (self.ethdebug_info or self.multi_contract_parser) and not ethdebug_boundaries:
             # Fallback to the original method if ETHDebug boundaries weren't found
             for i, step in enumerate(trace.steps):
                 if step.op == "JUMPDEST":
-                    context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
+                    # Get current contract address for multi-contract mode
+                    address = self.get_current_contract_address(trace, i) if self.multi_contract_parser else None
+                    context = self.get_source_context_for_step(step, address, context_lines=0)
                     if context and 'function' in context.get('content', ''):
                         # Extract function name from source
                         content = context['content'].strip()
@@ -847,12 +1008,45 @@ class TransactionTracer:
                 # Extract call parameters from stack
                 if len(step.stack) >= 7:  # CALL requires 7 stack items
                     gas = int(step.stack[0], 16)
-                    to_addr = '0x' + step.stack[1][-40:]  # Extract address (last 20 bytes)
+                    raw_addr_value = step.stack[1]
                     value = int(step.stack[2], 16) if step.op == "CALL" else 0
+                    
+                    # Check if this might be a memory offset (--via-ir pattern)
+                    if self.is_likely_memory_offset(raw_addr_value) and step.memory:
+                        # Try to extract the actual address from memory
+                        offset = int(raw_addr_value, 16)
+                        actual_addr = self.extract_address_from_memory(step.memory, offset)
+                        if actual_addr:
+                            to_addr = actual_addr
+                            print(f"Debug: Resolved address from memory offset 0x{offset:x}: {to_addr}")
+                        else:
+                            # For --via-ir optimized code, we might need to detect the actual
+                            # target by looking at what contract executes after the CALL
+                            # For now, mark it as unknown and resolve it later
+                            to_addr = self.extract_address_from_stack(raw_addr_value)
+                            
+                            # Special handling for via-ir low addresses
+                            if int(raw_addr_value, 16) < 0x1000:
+                                # Look ahead to see what contract actually executes
+                                if i + 1 < len(trace.steps) and trace.steps[i + 1].depth > step.depth:
+                                    # External call succeeded, try to determine target from context
+                                    # This will be resolved when we detect the depth increase
+                                    to_addr = f"0x{int(raw_addr_value, 16):040x}"  # Placeholder
+                    else:
+                        # Normal address extraction
+                        to_addr = self.extract_address_from_stack(raw_addr_value)
+                    
+                    # Push context if in multi-contract mode
+                    if self.multi_contract_parser:
+                        self.multi_contract_parser.push_context(to_addr, step.op)
+                    
+                    # Format call name with proper address display
+                    addr_display = self.format_address_display(to_addr, short=True)
+                    call_name = f"{step.op.lower()}_to_{addr_display}"
                     
                     # Create external call entry
                     external_call = FunctionCall(
-                        name=f"{step.op.lower()}_to_{to_addr[:10]}",
+                        name=call_name,
                         selector="",
                         entry_step=i,
                         exit_step=None,
@@ -867,10 +1061,41 @@ class TransactionTracer:
                     function_calls.append(external_call)
                     external_call_depth += 1
             
+            # Check for external call execution (depth increase)
+            if i > 0 and step.depth > trace.steps[i-1].depth:
+                # We've entered an external call
+                # Check if the previous call had an unresolved address (via-ir pattern)
+                if call_stack and call_stack[-1].call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
+                    recent_call = call_stack[-1]
+                    # Check if this was a via-ir optimized call with low address
+                    if recent_call.args and len(recent_call.args) > 0:
+                        to_param = recent_call.args[0]  # ("to", address)
+                        if len(to_param) > 1 and isinstance(to_param[1], str):
+                            try:
+                                addr_val = int(to_param[1], 16) if to_param[1].startswith('0x') else int(to_param[1], 16)
+                                if addr_val < 0x1000:  # Likely a via-ir optimization
+                                    # Try to determine the actual contract from the source mapping
+                                    if self.multi_contract_parser:
+                                        # Check which contract's code is executing
+                                        actual_addr = self.detect_executing_contract(trace, i)
+                                        if actual_addr and actual_addr != to_param[1]:
+                                            # Update the call with the actual address
+                                            recent_call.args[0] = ("to", actual_addr)
+                                            recent_call.name = f"{recent_call.call_type.lower()}_to_{self.format_address_display(actual_addr, short=True)}"
+                                            # Update the context stack
+                                            self.multi_contract_parser.pop_context()
+                                            self.multi_contract_parser.push_context(actual_addr, recent_call.call_type)
+                            except ValueError:
+                                pass
+            
             # Check for external call returns (depth decrease)
             if i > 0 and step.depth < trace.steps[i-1].depth:
                 # External call has returned
                 if call_stack and external_call_depth > 0:
+                    # Pop context if in multi-contract mode
+                    if self.multi_contract_parser:
+                        self.multi_contract_parser.pop_context()
+                    
                     # Find the most recent external call
                     for j in range(len(call_stack) - 1, -1, -1):
                         if call_stack[j].call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
@@ -1077,16 +1302,37 @@ class TransactionTracer:
         # Always add the contract entry point first
         if len(trace.steps) > 0:
             # Determine if this is contract creation or runtime
-            contract_name = self.ethdebug_info.contract_name if self.ethdebug_info else 'Contract'
-            if self.ethdebug_info and self.ethdebug_info.environment == 'create':
+            # In multi-contract mode, use the actual target contract
+            if self.multi_contract_parser and trace.to_addr:
+                target_contract = self.multi_contract_parser.get_contract_at_address(trace.to_addr)
+                if target_contract:
+                    contract_name = target_contract.name
+                    is_create = target_contract.ethdebug_info.environment == 'create'
+                else:
+                    contract_name = 'Contract'
+                    is_create = False
+            else:
+                contract_name = self.ethdebug_info.contract_name if self.ethdebug_info else 'Contract'
+                is_create = self.ethdebug_info and self.ethdebug_info.environment == 'create'
+            
+            if is_create:
                 entry_name = f"{contract_name}::constructor"
             else:
                 entry_name = f"{contract_name}::runtime_dispatcher"
             
             # Get source location for contract definition
             source_line = None
-            if self.ethdebug_info:
-                # Find first meaningful source mapping (usually contract definition)
+            if self.multi_contract_parser and trace.to_addr:
+                # Multi-contract mode: get source from the target contract
+                contract_info = self.multi_contract_parser.get_contract_at_address(trace.to_addr)
+                if contract_info:
+                    for step in trace.steps[:10]:
+                        context = contract_info.parser.get_source_context(step.pc, context_lines=0)
+                        if context and 'contract' in context.get('content', ''):
+                            source_line = context['line']
+                            break
+            elif self.ethdebug_info:
+                # Single contract mode
                 for step in trace.steps[:10]:
                     context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
                     if context and 'contract' in context.get('content', ''):
@@ -1111,13 +1357,30 @@ class TransactionTracer:
             for call in function_calls[1:]:
                 call.depth += 1
         
+        # Clean up execution context for entry contract in multi-contract mode
+        if self.multi_contract_parser and trace.to_addr:
+            # Pop the entry contract's context from the execution stack
+            self.multi_contract_parser.pop_context()
+        
         return function_calls
     
     def print_function_trace(self, trace: TransactionTrace, function_calls: List[FunctionCall]):
-        """Print pretty function call trace."""
+        """Print pretty function call trace with multi-contract support."""
         print(f"\n{bold('Function Call Trace:')} {info(trace.tx_hash)}")
-        if trace.to_addr:
-            print(f"{dim('Contract:')} {info(trace.to_addr)}")
+        
+        # Show all loaded contracts if in multi-contract mode
+        if self.multi_contract_parser:
+            loaded_contracts = self.multi_contract_parser.get_all_loaded_contracts()
+            if loaded_contracts:
+                print(f"{dim('Loaded contracts:')}")
+                for addr, name in loaded_contracts:
+                    addr_display = self.format_address_display(addr, short=False)
+                    print(f"  {info(addr_display)}")
+        else:
+            if trace.to_addr:
+                addr_display = self.format_address_display(trace.to_addr, short=False)
+                print(f"{dim('Contract:')} {info(addr_display)}")
+        
         print(f"{dim('Gas used:')} {number(str(trace.gas_used))}")
         
         if trace.error:
@@ -1142,8 +1405,20 @@ class TransactionTracer:
                 else:
                     func_display = cyan(call.name)
                 
-                # Add call type indicator
-                if call.call_type == "external":
+                # Add call type indicator with enhanced info for external calls
+                if call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
+                    # For external calls, show the target contract name if available
+                    target_info = ""
+                    if self.multi_contract_parser and call.args:
+                        # Extract target address from args
+                        for arg_name, arg_value in call.args:
+                            if arg_name == "to":
+                                target_contract = self.multi_contract_parser.get_contract_at_address(str(arg_value))
+                                if target_contract:
+                                    target_info = f" → {target_contract.name}"
+                                break
+                    call_type_display = success(f"[{call.call_type}]{target_info}")
+                elif call.call_type == "external":
                     call_type_display = success("[external]")
                 elif call.call_type == "internal":
                     call_type_display = info("[internal]")
@@ -1158,11 +1433,23 @@ class TransactionTracer:
                 # Format source location
                 source_info = ""
                 if call.source_line:
-                    if self.ethdebug_info:
+                    if self.ethdebug_info or self.multi_contract_parser:
                         # Try to get more detailed source info
                         step = trace.steps[call.entry_step] if call.entry_step < len(trace.steps) else None
                         if step:
-                            context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
+                            # Determine contract address for multi-contract mode
+                            address = None
+                            if self.multi_contract_parser:
+                                # For external calls, use the target address
+                                if call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"] and call.args:
+                                    for arg_name, arg_value in call.args:
+                                        if arg_name == "to":
+                                            address = str(arg_value)
+                                            break
+                                else:
+                                    address = self.get_current_contract_address(trace, call.entry_step)
+                            
+                            context = self.get_source_context_for_step(step, address, context_lines=0)
                             if context:
                                 source_info = dim(f" @ {os.path.basename(context['file'])}:{context['line']}")
                             else:
@@ -1171,8 +1458,16 @@ class TransactionTracer:
                         source_info = dim(f" @ line {call.source_line}")
                 elif "dispatcher" in call.name or "constructor" in call.name:
                     # For entry point, show contract definition line
-                    if self.ethdebug_info:
-                        source_info = dim(f" @ {os.path.basename(self.ethdebug_info.sources.get(0, 'Contract.sol'))}:8")
+                    if self.multi_contract_parser and trace.to_addr:
+                        # Multi-contract mode: get the correct contract's source
+                        contract_info = self.multi_contract_parser.get_contract_at_address(trace.to_addr)
+                        if contract_info and contract_info.ethdebug_info:
+                            source_file = os.path.basename(contract_info.ethdebug_info.sources.get(0, f'{contract_info.name}.sol'))
+                            source_info = dim(f" @ {source_file}:{call.source_line if call.source_line else '1'}")
+                        else:
+                            source_info = dim(f" @ {contract_info.name}.sol:1" if contract_info else " @ Contract entry point")
+                    elif self.ethdebug_info:
+                        source_info = dim(f" @ {os.path.basename(self.ethdebug_info.sources.get(0, 'Contract.sol'))}:{call.source_line if call.source_line else '1'}")
                     else:
                         source_info = dim(f" @ Contract entry point")
                 
