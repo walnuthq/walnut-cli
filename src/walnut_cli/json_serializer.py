@@ -246,6 +246,12 @@ class TraceSerializer:
             trace_type = "INTERNALCALL"
         elif trace_type == "STATICCALL":
             trace_type = "CALL"
+        elif trace_type in ["CREATE", "CREATE2"]:
+            # Keep CREATE/CREATE2 as is
+            pass
+        elif trace_type == "ENTRY" and trace.contract_address:
+            # For entry points that are contract creation, mark as CREATE
+            trace_type = "CREATE"
 
          # Build input data with proper encoding
         input_data = self.encode_function_input(call, trace)
@@ -256,6 +262,10 @@ class TraceSerializer:
             param_types = ["uint256"] * len(call.args) if call.args else []
             call.selector = self.get_function_signature_hash(call.name, param_types)
             input_data = self.encode_function_input(call, trace)
+        
+        # For CREATE operations at the entry point, use transaction input data
+        if trace_type in ["CREATE", "CREATE2"] and call.depth == 0:
+            input_data = trace.input_data if trace.input_data else "0x"
         
         # Extract gas information
         # For the root call, get gas from first step
@@ -359,6 +369,12 @@ class TraceSerializer:
         elif trace_type == "INTERNALCALL":
             if hasattr(call, 'contract_address'):
                 trace_call["contractAddress"] = call.contract_address
+        elif trace_type in ["CREATE", "CREATE2"]:
+            # For CREATE/CREATE2, include the deployed contract address
+            if hasattr(call, 'contract_address') and call.contract_address:
+                trace_call["deployedContractAddress"] = call.contract_address
+            # Set from address
+            trace_call["from"] = trace.from_addr if call.depth == 0 else None
         # Gas and gasUsed logic
         if call.entry_step < len(trace.steps):
             trace_call["gas"] = hex(trace.steps[call.entry_step].gas)
@@ -726,6 +742,11 @@ class TraceSerializer:
                 "traceCall": root_trace_call,
                 "abis": abis
             }
+        
+        # Add contract deployment info if this is a creation transaction
+        if trace.contract_address:
+            response["isContractCreation"] = True
+            response["deployedContractAddress"] = trace.contract_address
         
         # Add error message if transaction reverted
         if not trace.success and trace.error:

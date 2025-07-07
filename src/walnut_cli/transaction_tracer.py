@@ -96,6 +96,7 @@ class TransactionTrace:
     success: bool
     error: Optional[str] = None
     debug_trace_available: bool = True
+    contract_address: Optional[str] = None  # For contract creation transactions
 
 
 class TransactionTracer:
@@ -436,7 +437,8 @@ class TransactionTracer:
             steps=steps,
             success=receipt['status'] == 1,
             error=error_msg if error_msg else debug_error,
-            debug_trace_available=debug_trace_available
+            debug_trace_available=debug_trace_available,
+            contract_address=receipt.get('contractAddress')  # Add contract address from receipt
         )
     
     def simulate_call_trace(self, to, from_, calldata, block, tx_index=None, value = 0):
@@ -1313,6 +1315,26 @@ class TransactionTracer:
                         if target_contract:
                             self.ethdebug_info = target_contract.ethdebug_info
                             self.ethdebug_parser = target_contract.parser
+            # Handle contract creation
+            elif step.op in ["CREATE", "CREATE2"]:
+                call = self._process_create_call(step, i, current_contract, current_depth, trace)
+                if call:
+                    call.call_id = next_call_id
+                    call.parent_call_id = call_stack[-1].call_id if call_stack else None
+                    if call_stack:
+                        parent_call = call_stack[-1]
+                        parent_call.children_call_ids.append(call.call_id)
+                    next_call_id += 1
+                    function_calls.append(call)
+                    call_stack.append(call)
+                    context_stack.append({
+                        'contract': current_contract,
+                        'depth': current_depth,
+                        'return_pc': step.pc + 1,
+                        'ethdebug_info': self.ethdebug_info,
+                        'ethdebug_parser': self.ethdebug_parser
+                    })
+                    current_depth += 1
             # Internal functions
             elif step.op == "JUMPDEST":
                 call = self._detect_internal_call(step, i, current_contract, call_stack)
@@ -1565,6 +1587,9 @@ class TransactionTracer:
         contract_name = None
         source_line = None
         
+        # Check if this is a contract creation transaction
+        is_creation = trace.to_addr is None or trace.to_addr == "0x0000000000000000000000000000000000000000"
+        
         if self.multi_contract_parser and trace.to_addr:
             contract_info = self.multi_contract_parser.get_contract_at_address(trace.to_addr)
             if contract_info:
@@ -1574,9 +1599,18 @@ class TransactionTracer:
             contract_name = self.ethdebug_info.contract_name
         if not contract_name:
             contract_name = "Contract"
+        
+        # For contract creation, show constructor instead of runtime_dispatcher
+        if is_creation:
+            entry_name = f"{contract_name}::constructor"
+            # Get the deployed contract address from the transaction receipt if available
+            contract_address = getattr(trace, 'contract_address', None)
+        else:
+            entry_name = f"{contract_name}::runtime_dispatcher"
+            contract_address = trace.to_addr
 
         return FunctionCall(
-            name=f"{contract_name}::runtime_dispatcher",
+            name=entry_name,
             selector="",
             entry_step=0,
             exit_step=len(trace.steps)-1,
@@ -1584,7 +1618,7 @@ class TransactionTracer:
             depth=0,
             args=[],
             call_type="entry",
-            contract_address=trace.to_addr,
+            contract_address=contract_address,
             source_line=source_line
         )
 
@@ -1669,6 +1703,83 @@ class TransactionTracer:
             contract_address=to_addr
         )
 
+    def _process_create_call(self, step: TraceStep, step_idx: int, 
+                           current_contract: str, current_depth: int, trace: TransactionTrace) -> Optional[FunctionCall]:
+        """Process CREATE/CREATE2 operations."""
+        if step.op == "CREATE":
+            # CREATE takes: value, offset, size
+            if len(step.stack) < 3:
+                return None
+            value = int(step.stack[-1], 16)
+            offset = int(step.stack[-2], 16)
+            size = int(step.stack[-3], 16)
+            salt = None
+        elif step.op == "CREATE2":
+            # CREATE2 takes: value, offset, size, salt
+            if len(step.stack) < 4:
+                return None
+            value = int(step.stack[-1], 16)
+            offset = int(step.stack[-2], 16)
+            size = int(step.stack[-3], 16)
+            salt = step.stack[-4]
+        else:
+            return None
+        
+        # Calculate the address that will be created
+        # This is complex and depends on the CREATE/CREATE2 logic
+        # For now, we'll show a placeholder
+        created_address = self._extract_created_address(step_idx, trace)
+        
+        # Extract init code from memory if possible
+        init_code = self._extract_memory_slice(step, offset, size)
+        
+        # Build args for display
+        args = [("value", value)]
+        if salt:
+            args.append(("salt", salt))
+        if init_code and len(init_code) > 10:
+            args.append(("init_code", f"0x{init_code[:20]}..."))
+        
+        contract_name = "NewContract"
+        if created_address:
+            contract_name = self.format_address_display(created_address, short=True)
+        
+        return FunctionCall(
+            name=f"{step.op} → {contract_name}::constructor",
+            selector="",
+            entry_step=step_idx,
+            exit_step=None,
+            gas_used=0,
+            depth=current_depth + 1,
+            args=args,
+            call_type=step.op,
+            contract_address=created_address
+        )
+    
+    def _extract_created_address(self, create_step_idx: int, trace: TransactionTrace) -> Optional[str]:
+        """Extract the created contract address by looking ahead in the trace."""
+        # After a successful CREATE/CREATE2, the address is typically pushed onto the stack
+        for i in range(create_step_idx + 1, min(create_step_idx + 10, len(trace.steps))):
+            step = trace.steps[i]
+            if step.op == "PUSH20" and step.stack:
+                # The new address might be at the top of the stack
+                addr = self.extract_address_from_stack([step.stack[-1]])
+                if addr and addr != "0x0000000000000000000000000000000000000000":
+                    return addr
+        return None
+    
+    def _extract_memory_slice(self, step: TraceStep, offset: int, size: int) -> Optional[str]:
+        """Extract a slice of memory."""
+        if not step.memory or size == 0:
+            return None
+        
+        # Memory is a hex string, each byte is 2 hex chars
+        start = offset * 2
+        end = start + (size * 2)
+        
+        if start < len(step.memory) and end <= len(step.memory):
+            return step.memory[start:end]
+        return None
     
     def _find_contract_definition_line(self, contract_info) -> Optional[int]:
         """Find the source line where contract is defined."""
@@ -2104,6 +2215,10 @@ class TransactionTracer:
         """Print pretty function call trace with multi-contract support."""
         print(f"\n{bold('Function Call Trace:')} {info(trace.tx_hash)}")
         
+        # Show contract deployment info if this is a creation transaction
+        if trace.contract_address:
+            print(f"{dim('Deployed Contract:')} {info(trace.contract_address)}")
+        
         # Show all loaded contracts if in multi-contract mode
         if self.multi_contract_parser:
             loaded_contracts = self.multi_contract_parser.get_all_loaded_contracts()
@@ -2227,7 +2342,10 @@ class TransactionTracer:
                             value_str = cyan(str(param_value))
                         print(f"{indent}   {info(param_name)}: {value_str}")
                 
-                if call.return_value:
+                # Show created contract address for CREATE/CREATE2
+                if call.call_type in ["CREATE", "CREATE2"] and call.contract_address:
+                    print(f"{indent}   → {success('deployed at:')} {info(call.contract_address)}")
+                elif call.return_value:
                     print(f"{indent}   → {call.return_value}")
         
         print(dim("-" * 60))
