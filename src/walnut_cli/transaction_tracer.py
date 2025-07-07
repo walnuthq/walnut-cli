@@ -712,7 +712,29 @@ class TransactionTracer:
         """Decode function parameters from calldata using ABI."""
         params = []
         
+        # Extract parameter data
+        if isinstance(calldata, str):
+            if calldata.startswith('0x'):
+                param_data_hex = calldata[10:]  # Skip 0x + 8 hex chars (selector)
+            else:
+                param_data_hex = calldata[8:]  # Skip 8 hex chars (selector)
+        else:
+            param_data_hex = calldata.hex()[8:]  # Skip 8 hex chars if bytes
+        
         if selector not in self.function_abis:
+            # No ABI, return raw hex data if any
+            if param_data_hex:
+                # Show raw calldata in 32-byte chunks (common for function arguments)
+                chunk_size = 64  # 32 bytes = 64 hex chars
+                for i in range(0, len(param_data_hex), chunk_size):
+                    chunk = param_data_hex[i:i+chunk_size]
+                    if chunk:
+                        # Try to interpret as uint256
+                        try:
+                            int_value = int(chunk, 16)
+                            params.append((f"arg{i//chunk_size}", f"{int_value} (0x{chunk})"))
+                        except:
+                            params.append((f"arg{i//chunk_size}", f"0x{chunk}"))
             return params
         
         abi_item = self.function_abis[selector]
@@ -722,15 +744,6 @@ class TransactionTracer:
             return params
         
         try:
-            # Remove selector from calldata
-            if isinstance(calldata, str):
-                if calldata.startswith('0x'):
-                    param_data_hex = calldata[10:]  # Skip 0x + 8 hex chars (selector)
-                else:
-                    param_data_hex = calldata[8:]  # Skip 8 hex chars (selector)
-            else:
-                param_data_hex = calldata.hex()[8:]  # Skip 8 hex chars if bytes
-            
             # Convert hex string to bytes for eth_abi
             param_data_bytes = bytes.fromhex(param_data_hex)
             
@@ -1545,30 +1558,63 @@ class TransactionTracer:
                     if step.op == "JUMPDEST" and i > 35:
                         # This could be our main function
                         source_line = None
+                        should_add_main_function = False
+                        
                         if self.ethdebug_info:
                             context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
                             if context and context['line'] > 8:
                                 source_line = context['line']
-                                # Decode parameters from calldata
-                                decoded_params = self.decode_function_parameters(main_selector, trace.input_data)
-                                
-                                # Insert at beginning (after dispatcher)
-                                main_call = FunctionCall(
-                                    name=main_function_name,
-                                    selector=main_selector,
-                                    entry_step=i,
-                                    exit_step=function_calls[0].entry_step - 1 if function_calls else len(trace.steps) - 1,
-                                    gas_used=trace.steps[i].gas - (trace.steps[function_calls[0].entry_step - 1].gas if function_calls else trace.steps[-1].gas),
-                                    depth=0,
-                                    args=decoded_params,
-                                    source_line=source_line,
-                                    call_type="external"  # Main entry from transaction
-                                )
-                                function_calls.insert(0, main_call)
-                                # Adjust depth of subsequent calls
-                                for call in function_calls[1:]:
-                                    call.depth += 1
-                                break
+                                should_add_main_function = True
+                        else:
+                            # No debug info, but we can still try to identify the main function
+                            # by checking if this JUMPDEST is likely the main function entry
+                            # Heuristic: it's after the dispatcher, within reasonable steps, and has high gas
+                            if i < 100 and step.gas > 0:
+                                # Check if this is likely the main function by looking at gas consumption pattern
+                                # The main function usually has significant gas after the dispatcher
+                                if i > 0 and trace.steps[0].gas > 0:
+                                    gas_consumed_so_far = trace.steps[0].gas - step.gas
+                                    # If we've consumed less than 10% of gas, this is likely still in the dispatcher/main function area
+                                    if gas_consumed_so_far < trace.steps[0].gas * 0.1:
+                                        should_add_main_function = True
+                        
+                        if should_add_main_function:
+                            # Decode parameters from calldata
+                            decoded_params = self.decode_function_parameters(main_selector, trace.input_data)
+                            
+                            # Insert at beginning (after dispatcher)
+                            main_call = FunctionCall(
+                                name=main_function_name,
+                                selector=main_selector,
+                                entry_step=i,
+                                exit_step=len(trace.steps) - 1,  # Main function runs to the end
+                                gas_used=trace.steps[i].gas - trace.steps[-1].gas if trace.steps else 0,
+                                depth=1,  # Depth 1 since it's under dispatcher
+                                args=decoded_params,
+                                source_line=source_line,
+                                call_type="external",  # Main entry from transaction
+                                call_id=next_call_id,
+                                parent_call_id=function_calls[0].call_id if function_calls else None,
+                                children_call_ids=[]
+                            )
+                            next_call_id += 1
+                            
+                            # Insert after dispatcher
+                            if len(function_calls) > 0:
+                                function_calls.insert(1, main_call)
+                                # Update dispatcher to have main as child
+                                function_calls[0].children_call_ids.append(main_call.call_id)
+                                # Update subsequent calls to be children of main instead of dispatcher
+                                for j in range(2, len(function_calls)):
+                                    if function_calls[j].parent_call_id == function_calls[0].call_id and function_calls[j].depth == 1:
+                                        function_calls[j].parent_call_id = main_call.call_id
+                                        main_call.children_call_ids.append(function_calls[j].call_id)
+                                        # Remove from dispatcher's children
+                                        if function_calls[j].call_id in function_calls[0].children_call_ids:
+                                            function_calls[0].children_call_ids.remove(function_calls[j].call_id)
+                            else:
+                                function_calls.append(main_call)
+                            break
 
         return function_calls
 
@@ -2308,7 +2354,11 @@ class TransactionTracer:
                     else:
                         call_type_display = warning(f"[{call.call_type}] [non-verified]")
                 elif call.call_type == "external":
-                    call_type_display = success("[external]")
+                    # Check if we have debug info for external calls
+                    if call.source_line and call.source_line != "Contract entry point":
+                        call_type_display = success("[external]")
+                    else:
+                        call_type_display = warning("[external] [non-verified]")
                 elif call.call_type == "internal":
                     call_type_display = info("[internal]")
                 elif call.call_type == "entry":
