@@ -607,6 +607,7 @@ class TraceSerializer:
                 trace, ethdebug_info, multi_parser, abis, tracer_instance
             )
             response = {
+                "status": "success" if trace.success else "reverted",
                 "traceCall": root_trace_call,
                 "steps": steps,
                 "contracts": contracts
@@ -614,9 +615,14 @@ class TraceSerializer:
         else:
             # Basic response without step-by-step debugging
             response = {
+                "status": "success" if trace.success else "reverted",
                 "traceCall": root_trace_call,
                 "abis": abis
             }
+        
+        # Add error message if transaction reverted
+        if not trace.success and trace.error:
+            response["error"] = trace.error
         
         # Convert any non-serializable objects
         return self._convert_to_serializable(response)

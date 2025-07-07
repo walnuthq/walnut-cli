@@ -396,6 +396,27 @@ class TransactionTracer:
             )
             steps.append(trace_step)
         
+        # Extract error message for reverted transactions
+        error_msg = trace_result.get('error')
+        if not error_msg and receipt['status'] == 0:
+            # Try to decode revert reason from return value
+            return_value = trace_result.get('returnValue', '')
+            if return_value and return_value.startswith('08c379a0'):
+                # This is Error(string) - decode the revert reason
+                try:
+                    data = return_value[8:]  # Skip selector
+                    offset = int(data[:64], 16)
+                    length = int(data[64:128], 16)
+                    string_hex = data[128:128+length*2]
+                    error_msg = bytes.fromhex(string_hex).decode('utf-8')
+                except:
+                    error_msg = "Unknown revert reason"
+            elif return_value:
+                # Other revert types (custom errors, etc.)
+                error_msg = f"Reverted with data: 0x{return_value}"
+            else:
+                error_msg = "Transaction reverted without reason"
+        
         return TransactionTrace(
             tx_hash=tx_hash,
             from_addr=tx['from'],
@@ -406,7 +427,7 @@ class TransactionTracer:
             output=trace_result.get('returnValue', '0x'),
             steps=steps,
             success=receipt['status'] == 1,
-            error=trace_result.get('error')
+            error=error_msg
         )
     
     def simulate_call_trace(self, to, from_, calldata, block, tx_index=None, value = 0):
@@ -454,6 +475,28 @@ class TransactionTracer:
             )
             steps.append(trace_step)
 
+        # Extract error message for failed calls
+        error_msg = trace_result.get('error')
+        is_failed = trace_result.get('failed', False)
+        if not error_msg and is_failed:
+            # Try to decode revert reason from return value
+            return_value = trace_result.get('returnValue', '')
+            if return_value and return_value.startswith('08c379a0'):
+                # This is Error(string) - decode the revert reason
+                try:
+                    data = return_value[8:]  # Skip selector
+                    offset = int(data[:64], 16)
+                    length = int(data[64:128], 16)
+                    string_hex = data[128:128+length*2]
+                    error_msg = bytes.fromhex(string_hex).decode('utf-8')
+                except:
+                    error_msg = "Unknown revert reason"
+            elif return_value:
+                # Other revert types (custom errors, etc.)
+                error_msg = f"Reverted with data: 0x{return_value}"
+            else:
+                error_msg = "Call failed without reason"
+        
         # Compose TransactionTrace (simulate, so tx_hash is None)
         return TransactionTrace(
             tx_hash=None,
@@ -464,8 +507,8 @@ class TransactionTracer:
             gas_used=trace_result.get('gas', 0),
             output=trace_result.get('returnValue', '0x'),
             steps=steps,
-            success=trace_result.get('failed', False) is False,
-            error=trace_result.get('error')
+            success=not is_failed,
+            error=error_msg
         )
 
     def _basic_trace(self, tx_hash: str) -> Dict[str, Any]:
@@ -2010,8 +2053,13 @@ class TransactionTracer:
         
         print(f"{dim('Gas used:')} {number(str(trace.gas_used))}")
         
-        if trace.error:
-            print(f"{error('Error:')} {trace.error}")
+        # Show transaction status
+        if trace.success:
+            print(f"{dim('Status:')} {success('SUCCESS')}")
+        else:
+            print(f"{dim('Status:')} {error('REVERTED')}")
+            if trace.error:
+                print(f"{error('Error:')} {trace.error}")
         
         print(f"\n{bold('Call Stack:')}")
         print(dim("-" * 60))
