@@ -7,6 +7,7 @@ Solidity contracts on actual blockchain networks.
 
 import json
 import os
+import sys
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from web3 import Web3
@@ -94,10 +95,11 @@ class TransactionTracer:
     Traces and replays Ethereum transactions for debugging.
     """
     
-    def __init__(self, rpc_url: str = "http://localhost:8545"):
+    def __init__(self, rpc_url: str = "http://localhost:8545", quiet_mode: bool = False):
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
         if not self.w3.is_connected():
             raise ConnectionError(f"Failed to connect to {rpc_url}")
+        self.quiet_mode = quiet_mode
         
         self.source_maps = {}
         self.contracts = {}
@@ -107,13 +109,18 @@ class TransactionTracer:
         self.function_signatures = {}  # selector -> function name
         self.function_abis = {}  # selector -> full ABI item
         self.function_params = {}  # function name -> parameter info
+    
+    def _log(self, message: str, level: str = "info"):
+        """Log a message to stderr if not in quiet mode."""
+        if not self.quiet_mode:
+            print(message, file=sys.stderr)
         
     def load_debug_info(self, debug_file: str) -> Dict[int, Tuple[str, int]]:
         """Load debug info from solx output."""
         pc_to_source = {}
         
         if not os.path.exists(debug_file):
-            print(f"Warning: Debug file {debug_file} not found")
+            self._log(f"Warning: Debug file {debug_file} not found")
             return pc_to_source
         
         with open(debug_file, 'r') as f:
@@ -169,13 +176,13 @@ class TransactionTracer:
                     line, col = self.ethdebug_parser.offset_to_line_col(source_path, offset)
                     pc_to_source[instruction.offset] = (0, line)  # Use 0 as file_id for compatibility
             
-            print(f"Loaded {success(str(len(pc_to_source)))} PC mappings from ethdebug")
-            print(f"Contract: {info(self.ethdebug_info.contract_name)}")
-            print(f"Environment: {info(self.ethdebug_info.environment)}")
+            self._log(f"Loaded {success(str(len(pc_to_source)))} PC mappings from ethdebug")
+            self._log(f"Contract: {info(self.ethdebug_info.contract_name)}")
+            self._log(f"Environment: {info(self.ethdebug_info.environment)}")
             return pc_to_source
             
         except Exception as e:
-            print(f"Warning: Failed to load ethdebug info: {e}")
+            self._log(f"Warning: Failed to load ethdebug info: {e}")
             return {}
     
     def get_source_context_for_step(self, step: TraceStep, address: Optional[str] = None, context_lines: int = 2) -> Optional[Dict[str, Any]]:

@@ -14,6 +14,7 @@ from .transaction_tracer import TransactionTracer, SourceMapper
 from .evm_repl import EVMDebugger
 from .abi_utils import match_abi_types, match_single_type, parse_signature, parse_tuple_arg
 from .multi_contract_ethdebug_parser import MultiContractETHDebugParser
+from .json_serializer import TraceSerializer
 
 
 def find_debug_file(contract_addr: str) -> str:
@@ -41,10 +42,11 @@ def trace_command(args):
     """Execute the trace command."""
     
     # Create tracer
-    tracer = TransactionTracer(args.rpc)
+    tracer = TransactionTracer(args.rpc, quiet_mode=args.json)
     
     # Trace transaction
-    print(f"Loading transaction {args.tx_hash}...")
+    if not args.json:
+        print(f"Loading transaction {args.tx_hash}...")
     trace = tracer.trace_transaction(args.tx_hash)
     
     # Try to find debug file if not provided
@@ -146,7 +148,21 @@ def trace_command(args):
     
     # Print trace based on mode (but skip if going into interactive mode)
     if not args.interactive:
-        if args.raw:
+        if args.json:
+            # Output JSON format for web app
+            function_calls = tracer.analyze_function_calls(trace)
+            serializer = TraceSerializer()
+            # Update tracer to have the trace's to_addr for ABI mapping
+            tracer.to_addr = trace.to_addr
+            json_output = serializer.serialize_trace(
+                trace, 
+                function_calls,
+                getattr(tracer, 'ethdebug_info', None),
+                getattr(tracer, 'multi_contract_parser', None),
+                tracer
+            )
+            print(json.dumps(json_output, indent=2))
+        elif args.raw:
             # Show detailed instruction trace
             tracer.print_trace(trace, source_map, args.max_steps)
         else:
@@ -392,6 +408,7 @@ def main():
     trace_parser.add_argument('--max-steps', '-m', type=int, default=50, help='Maximum steps to show (use 0 or -1 for all steps)')
     trace_parser.add_argument('--interactive', '-i', action='store_true', help='Start interactive debugger')
     trace_parser.add_argument('--raw', action='store_true', help='Show raw instruction trace instead of function call trace')
+    trace_parser.add_argument('--json', action='store_true', help='Output trace data as JSON for web app consumption')
     
     # Create the 'simulate' subcommand
     simulate_parser = subparsers.add_parser('simulate', help='Simulate and debug an Ethereum transaction')
