@@ -31,6 +31,7 @@ NC='\033[0m' # No Color
 # Parse arguments
 CONTRACT_NAME=""
 CONTRACT_FILE=""
+CONSTRUCTOR_ARGS=()
 DUAL_COMPILE=false
 
 usage() {
@@ -93,8 +94,7 @@ while [[ $# -gt 0 ]]; do
             elif [ -z "$CONTRACT_FILE" ]; then
                 CONTRACT_FILE="$1"
             else
-                echo -e "${RED}Too many arguments${NC}"
-                usage
+                CONSTRUCTOR_ARGS+=("$1")
             fi
             shift
             ;;
@@ -274,6 +274,38 @@ if [[ "$BYTECODE" != 0x* ]]; then
     BYTECODE="0x$BYTECODE"
 fi
 
+DEPLOY_DATA="$BYTECODE"
+if [ ${#CONSTRUCTOR_ARGS[@]} -gt 0 ]; then
+    # Load ABI
+    if [ ! -f "$ABI_FILE" ]; then
+        echo -e "${RED}Error: ABI file not found ($ABI_FILE)${NC}"
+        exit 1
+    fi
+
+    # Search for constructor signature in ABI
+    CONSTRUCTOR_SIG=$(jq -r '.[] | select(.type=="constructor") | .inputs | map("\(.type)") | join(",")' "$ABI_FILE")
+    if [ -z "$CONSTRUCTOR_SIG" ]; then
+        CONSTRUCTOR_SIG=""
+    fi
+
+    # Prepare cast abi-encode string
+    if [ -n "$CONSTRUCTOR_SIG" ]; then
+        ABI_ENCODE_STR="constructor($CONSTRUCTOR_SIG)"
+    else
+        ABI_ENCODE_STR="constructor()"
+    fi
+
+    # Encode arguments
+    ENCODED_ARGS=$(cast abi-encode "$ABI_ENCODE_STR" "${CONSTRUCTOR_ARGS[@]}")
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Error: Failed to abi-encode constructor arguments${NC}"
+        exit 1
+    fi
+
+    # Combine bytecode and arguments (remove 0x from ENCODED_ARGS)
+    DEPLOY_DATA="${BYTECODE}${ENCODED_ARGS:2}"
+fi
+
 # Deploy with cast
 echo -e "\n${BLUE}Deploying to chain...${NC}"
 echo -e "${BLUE}Bytecode length: ${#BYTECODE} characters${NC}"
@@ -281,7 +313,7 @@ echo -e "${BLUE}Bytecode length: ${#BYTECODE} characters${NC}"
 DEPLOY_OUTPUT=$(cast send \
     --rpc-url "$RPC_URL" \
     --private-key "$PRIVATE_KEY" \
-    --create "$BYTECODE" \
+    --create "$DEPLOY_DATA" \
     --json)
 
 # Extract transaction hash and contract address
