@@ -8,9 +8,11 @@ import os
 import argparse
 import json
 from pathlib import Path
+import ast
 
 from .transaction_tracer import TransactionTracer, SourceMapper
 from .evm_repl import EVMDebugger
+from .abi_utils import match_abi_types, match_single_type, parse_signature, parse_tuple_arg
 from .multi_contract_ethdebug_parser import MultiContractETHDebugParser
 
 
@@ -184,6 +186,143 @@ def trace_command(args):
     
     return 0
 
+def simulate_command(args):
+    """Execute the simulate command."""
+
+    # Create tracer
+    tracer = TransactionTracer(args.rpc_url)
+    
+    # Load ABI from ethdebug-dir
+    if not args.ethdebug_dir:
+        print('Error: --ethdebug-dir is required for simulate')
+        sys.exit(1)
+    source_map = tracer.load_ethdebug_info(args.ethdebug_dir)
+    # Try to load ABI from ethdebug directory
+    if tracer.ethdebug_info:
+        abi_path = os.path.join(args.ethdebug_dir, f"{tracer.ethdebug_info.contract_name}.abi")
+        if os.path.exists(abi_path):
+            tracer.load_abi(abi_path)
+    else:
+        for abi_file in Path(args.ethdebug_dir).glob("*.abi"):
+            tracer.load_abi(str(abi_file))
+            break
+    
+    # Find function in ABI by name and types
+    func_name, func_types = parse_signature(args.function_signature)
+    abi_item = None
+    
+    # First try exact name match
+    for item in tracer.function_abis.values():
+        if item['name'] == func_name:
+            # Get ABI input types
+            abi_input_types = [inp['type'] for inp in item['inputs']]
+            
+            # Try to match types
+            if match_abi_types(func_types, abi_input_types):
+                abi_item = item
+                break
+    
+    # If not found, try more flexible matching
+    if not abi_item:
+        for item in tracer.function_abis.values():
+            if item['name'] == func_name:
+                abi_input_types = [inp['type'] for inp in item['inputs']]
+                
+                # For tuple types, we need to handle the conversion
+                if len(func_types) == len(abi_input_types):
+                    # Convert tuple types to match ABI format
+                    converted_types = []
+                    for parsed_type in func_types:
+                        if parsed_type.startswith('(') and parsed_type.endswith(')'):
+                            converted_types.append('tuple')
+                        else:
+                            converted_types.append(parsed_type)
+                    
+                    if converted_types == abi_input_types:
+                        abi_item = item
+                        break
+    
+    if not abi_item:
+        print(f'Function {args.function_signature} not found in ABI')
+        print(f'Available functions: {[item["name"] for item in tracer.function_abis.values()]}')
+        sys.exit(1)
+    
+    input_types = [inp['type'] for inp in abi_item['inputs']]
+    
+    # Parse function_args from CLI to correct types
+    if len(args.function_args) != len(input_types):
+        print(f'Function {args.function_signature} expects {len(input_types)} arguments, got {len(args.function_args)}')
+        sys.exit(1)
+    parsed_args = []
+    for val, typ, abi_input in zip(args.function_args, input_types, abi_item['inputs']):
+        # Basic type parsing
+        if typ.startswith('uint') or typ.startswith('int'):
+            parsed_args.append(int(val, 0))
+        elif typ == 'address':
+            parsed_args.append(val)
+        elif typ.startswith('bytes'):
+            if val.startswith('0x'):
+                parsed_args.append(bytes.fromhex(val[2:]))
+            else:
+                parsed_args.append(bytes.fromhex(val))
+        elif typ.startswith('tuple'):
+            try:
+                parsed_val = ast.literal_eval(val)
+                if 'components' in abi_input:
+                    parsed_args.append(parse_tuple_arg(parsed_val, abi_input))
+                else:
+                    parsed_args.append(parsed_val)
+            except Exception as e:
+                print(f"Error parsing tuple argument: {val} ({e})")
+                print("For structs/tuples, use Python tuple syntax, e.g. '(",")' or '([tuple1, tuple2])' for arrays of structs.")
+                sys.exit(1)
+        else:
+            parsed_args.append(val)
+    
+    from eth_abi.abi import encode
+    try:
+        # For tuple types, we need to pass the full ABI input structure
+        encoded_args = encode(func_types, parsed_args)
+    except Exception as e:
+        print(f'Error encoding arguments: {e}')
+        sys.exit(1)
+    print(encoded_args)
+    
+    # Calculate function selector (first 4 bytes of keccak256 hash of function signature)
+    from eth_hash.auto import keccak
+    function_signature = f"{func_name}({','.join(func_types)})"
+    selector = keccak(function_signature.encode())[:4]
+    
+    # Combine selector with encoded arguments
+    calldata = selector.hex() + encoded_args.hex()
+    
+    # Prepare call_obj
+    call_obj = {
+        'to': args.contract_address,
+        'from': args.from_addr,
+        'data': calldata,
+        'value': args.value
+    }
+    # Prepare trace_config
+    trace_config = {"disableStorage": False, "disableMemory": False}
+    if args.tx_index is not None:
+        trace_config["txIndex"] = args.tx_index
+    # Block param
+    block = args.block
+    # Simulate call
+    trace = tracer.simulate_call_trace(
+        args.contract_address, args.from_addr, calldata, block, args.tx_index, args.value
+    )
+    # Print trace based on mode
+    if not args.interactive:
+        if args.raw:
+            tracer.print_trace(trace, source_map, args.max_steps)
+        else:
+            function_calls = tracer.analyze_function_calls(trace)
+            tracer.print_function_trace(trace, function_calls)
+    else:
+        function_calls = tracer.analyze_function_calls(trace)
+    return 0
 
 def main():
     parser = argparse.ArgumentParser(description='Walnut CLI - Ethereum transaction analysis tool')
@@ -205,12 +344,26 @@ def main():
     trace_parser.add_argument('--interactive', '-i', action='store_true', help='Start interactive debugger')
     trace_parser.add_argument('--raw', action='store_true', help='Show raw instruction trace instead of function call trace')
     
+    # Create the 'simulate' subcommand
+    simulate_parser = subparsers.add_parser('simulate', help='Simulate and debug an Ethereum transaction')
+    simulate_parser.add_argument('contract_address', help='Contract address (0x...)')
+    simulate_parser.add_argument('function_signature', help='Function signature, e.g. increment(uint256)')
+    simulate_parser.add_argument('function_args', nargs='*', help='Arguments for the function')
+    simulate_parser.add_argument('--from', dest='from_addr', required=True, help='Sender address')
+    simulate_parser.add_argument('--block', type=int, default=None, help='Block number or tag (default: latest)')
+    simulate_parser.add_argument('--tx-index', type=int, default=None, help='Transaction index in block (optional)')
+    simulate_parser.add_argument('--value', type=int, default=0, help='ETH value to send (in wei)')
+    simulate_parser.add_argument('--ethdebug-dir', '-e', help='ETHDebug directory containing ethdebug.json and contract debug files')
+    simulate_parser.add_argument('--rpc-url', default='http://localhost:8545', help='RPC URL')
+    
     args = parser.parse_args()
     
     # Handle commands
     if args.command == 'trace':
         return trace_command(args)
-    
+    if args.command == 'simulate':
+        return simulate_command(args)
+        
     return 0
 
 

@@ -370,6 +370,65 @@ class TransactionTracer:
             error=trace_result.get('error')
         )
     
+    def simulate_call_trace(self, to, from_, calldata, block, tx_index=None, value = 0):
+        """Simulate a transaction execution."""
+
+        # Prepare call object
+        call_obj = {
+            'to': to,
+            'from': from_,
+            'data': "0x" + calldata if not calldata.startswith("0x") else calldata,
+            'value': hex(value) if isinstance(value, int) else value
+        }
+       
+        # Call debug_traceCall
+        try:
+            trace_config = {"disableStorage": False, "disableMemory": False}
+            if tx_index is not None:
+                trace_config["txIndex"] = tx_index
+            # Block param
+            if block is None:
+                block_param = 'latest'
+            else:
+                block_param = hex(block)
+
+            trace_result = self.w3.manager.request_blocking(
+                "debug_traceCall",
+                [call_obj, block_param, trace_config]
+            )
+        except Exception as e:
+            print(f"debug_traceCall not available: {e}")
+            raise
+
+        # Parse trace steps (reuse logic from trace_transaction)
+        steps = []
+        for i, step in enumerate(trace_result.get('structLogs', [])):
+            trace_step = TraceStep(
+                pc=step['pc'],
+                op=step['op'],
+                gas=step['gas'],
+                gas_cost=step.get('gasCost', 0),
+                depth=step['depth'],
+                stack=step.get('stack', []),
+                memory=''.join(step.get('memory', [])),
+                storage=step.get('storage', {})
+            )
+            steps.append(trace_step)
+
+        # Compose TransactionTrace (simulate, so tx_hash is None)
+        return TransactionTrace(
+            tx_hash=None,
+            from_addr=from_,
+            to_addr=to,
+            value=0,
+            input_data=calldata,
+            gas_used=trace_result.get('gas', 0),
+            output=trace_result.get('returnValue', '0x'),
+            steps=steps,
+            success=trace_result.get('failed', False) is False,
+            error=trace_result.get('error')
+        )
+
     def _basic_trace(self, tx_hash: str) -> Dict[str, Any]:
         """Basic trace using eth_call if debug namespace not available."""
         tx = self.w3.eth.get_transaction(tx_hash)

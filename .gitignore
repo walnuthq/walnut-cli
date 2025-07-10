@@ -1,5 +1,7 @@
 cache/
 debug/
+debug*/
 out/
 walnut.config.yaml
+walnut.config.local
 __pycache__/ 
