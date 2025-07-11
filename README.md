@@ -7,6 +7,7 @@ A transaction-based debugger for Solidity smart contracts.
 ## Features
 
 1. Transaction tracing
+2. Transaction simulation
 
 **Requirements**: Solidity compiler 0.8.29+ (for ETHDebug support)
 
@@ -241,6 +242,62 @@ Call Stack:
         #4 Counter::_updateValue [internal] gas: 20000 @ Counter.sol:20
 ------------------------------------------------------------
 ```
+
+
+### 5. Simulate a Transaction
+
+You can simulate a contract call (without sending a real transaction) using the `simulate` command. Supports all Solidity argument types, including structs/tuples.
+
+#### Basic usage
+
+```bash
+walnut-cli simulate <contract_address> <function_signature> [function_args ...] --from <sender_address> --ethdebug-dir <debug_dir> [--block <block_number>] [--tx-index <index>] [--rpc-url <rpc_url>]
+```
+
+#### Example: Simple increment function
+
+```bash
+walnut-cli simulate \
+    0x5FbDB2315678afecb367f032d93F642f64180aa3 "increment(uint256)" 10 \
+    --from 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 \
+    --ethdebug-dir ./debug \
+    --rpc-url "http://localhost:8545"
+```
+
+#### Example: Function with address argument
+
+```bash
+walnut-cli simulate \
+  0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9 \
+  "giveRightToVote(address)" \
+  0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
+  --from 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
+  --ethdebug-dir ./debug_ballot
+```
+
+#### Example: Function with struct/tuple argument
+
+```bash
+walnut-cli simulate \
+  0x0165878a594ca255338adfa4d48449f69242eb8f \
+  "submitPerson((string,uint256))" \
+  '("Alice", 30)' \
+  --ethdebug-dir ./debug_struct \
+  --from 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+```
+
+#### Example: Nested struct/tuple argument
+
+```bash
+walnut-cli simulate \
+  0x0165878a594ca255338adfa4d48449f69242eb8f \
+  "submitCompany((string,(string,uint256)))" \
+  '("Acme Corp", ("Bob", 42))' \
+  --ethdebug-dir ./debug_struct \
+  --from 0x286AF310eA3303c80eBE9a66F6998B21Bd8c1c29
+```
+
+> Argument format is fully compatible with Foundry's `cast send` command (e.g. for structs: `'("Alice", 30)'`, for arrays: `'[("Alice", 30), ("Bob", 42)]'`).
 
 ## Debug Information Formats
 
