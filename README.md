@@ -251,16 +251,15 @@ You can simulate a contract call (without sending a real transaction) using the 
 #### Basic usage
 
 ```bash
-./walnut-cli.py simulate <contract_address> <function_signature> [function_args ...] --from <sender_address> --ethdebug-dir <debug_dir> [--block <block_number>] [--tx-index <index>] [--rpc-url <rpc_url>]
+walnut-cli simulate <contract_address> <function_signature> [function_args ...] --from <sender_address> --ethdebug-dir <debug_dir> [--block <block_number>] [--tx-index <index>] [--rpc-url <rpc_url>]
 ```
 
 #### Example: Simple increment function
 
 ```bash
-./walnut-cli.py simulate \
+walnut-cli simulate \
     0x5FbDB2315678afecb367f032d93F642f64180aa3 "increment(uint256)" 10 \
     --from 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 \
-    --block 1 \
     --ethdebug-dir ./debug \
     --rpc-url "http://localhost:8545"
 ```
@@ -268,7 +267,7 @@ You can simulate a contract call (without sending a real transaction) using the 
 #### Example: Function with address argument
 
 ```bash
-./walnut-cli.py simulate \
+walnut-cli simulate \
   0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9 \
   "giveRightToVote(address)" \
   0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
@@ -279,7 +278,7 @@ You can simulate a contract call (without sending a real transaction) using the 
 #### Example: Function with struct/tuple argument
 
 ```bash
-./walnut-cli.py simulate \
+walnut-cli simulate \
   0x0165878a594ca255338adfa4d48449f69242eb8f \
   "submitPerson((string,uint256))" \
   '("Alice", 30)' \
@@ -290,7 +289,7 @@ You can simulate a contract call (without sending a real transaction) using the 
 #### Example: Nested struct/tuple argument
 
 ```bash
-./walnut-cli.py simulate \
+walnut-cli simulate \
   0x0165878a594ca255338adfa4d48449f69242eb8f \
   "submitCompany((string,(string,uint256)))" \
   '("Acme Corp", ("Bob", 42))' \
@@ -298,8 +297,7 @@ You can simulate a contract call (without sending a real transaction) using the 
   --from 0x286AF310eA3303c80eBE9a66F6998B21Bd8c1c29
 ```
 
-> **Note:**
-> - Argument format is fully compatible with Foundry's `cast send` command (e.g. for structs: `'("Alice", 30)'`, for arrays: `'[("Alice", 30), ("Bob", 42)]'`).
+> Argument format is fully compatible with Foundry's `cast send` command (e.g. for structs: `'("Alice", 30)'`, for arrays: `'[("Alice", 30), ("Bob", 42)]'`).
 
 ## Debug Information Formats
 

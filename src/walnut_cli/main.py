@@ -65,6 +65,7 @@ def trace_command(args):
                             debug_file = str(zasm_file)
                             print(f"Found debug file for deployment: {debug_file}")
                             break
+                        
         else:
             debug_file = find_debug_file(trace.to_addr)
             if debug_file:
@@ -191,22 +192,88 @@ def simulate_command(args):
 
     # Create tracer
     tracer = TransactionTracer(args.rpc_url)
-    
-    # Load ABI from ethdebug-dir
-    if not args.ethdebug_dir:
+    source_map = {}
+
+    # Multi-contract mode detection (same as trace_command)
+    multi_contract_mode = False
+    ethdebug_dirs = []
+    if hasattr(args, 'ethdebug_dir') and args.ethdebug_dir:
+        if isinstance(args.ethdebug_dir, list):
+            ethdebug_dirs = args.ethdebug_dir
+        else:
+            ethdebug_dirs = [args.ethdebug_dir]
+    if getattr(args, 'multi_contract', False) or (ethdebug_dirs and len(ethdebug_dirs) > 1) or getattr(args, 'contracts', None):
+        multi_contract_mode = True
+
+    if multi_contract_mode:
+        multi_parser = MultiContractETHDebugParser()
+        # Load from contracts mapping file if provided
+        if getattr(args, 'contracts', None):
+            try:
+                multi_parser.load_from_mapping_file(args.contracts)
+            except Exception as e:
+                print(f"Error loading contracts mapping file: {e}")
+                sys.exit(1)
+        # Load from ethdebug directories
+        if ethdebug_dirs:
+            for ethdebug_spec in ethdebug_dirs:
+                if ':' in ethdebug_spec:
+                    address, path = ethdebug_spec.split(':', 1)
+                    try:
+                        multi_parser.load_contract(address, path)
+                    except Exception as e:
+                        print(f"Error loading contract {address} from {path}: {e}")
+                        sys.exit(1)
+                else:
+                    deployment_file = Path(ethdebug_spec) / "deployment.json"
+                    if deployment_file.exists():
+                        try:
+                            print(f"Loading deployment.json from {ethdebug_spec}")
+                            print(f"Deployment file: {deployment_file}")
+                            multi_parser.load_from_deployment(deployment_file)
+                        except Exception as e:
+                            print(f"Error loading deployment.json from {ethdebug_spec}: {e}")
+                            sys.exit(1)
+                    else:
+                        print(f"Warning: No deployment.json found in {ethdebug_spec}, skipping...")
+        tracer.multi_contract_parser = multi_parser
+
+        # Set primary contract context for simulation
+        primary_contract = multi_parser.get_contract_at_address(args.contract_address)
+        print(primary_contract)
+        if not primary_contract:
+            print(f"Error: Contract address {args.contract_address} not found in loaded debug info.")
+            print(f"Loaded contracts: {[addr for addr in multi_parser.contracts.keys()]}")
+            sys.exit(1)
+        
+        tracer.ethdebug_parser = primary_contract.parser
+        tracer.ethdebug_info = primary_contract.ethdebug_info
+        source_map = primary_contract.parser.get_source_mapping()
+        # Load ABI for primary contract
+        abi_path = primary_contract.debug_dir / f"{primary_contract.name}.abi"
+        if abi_path.exists():
+            tracer.load_abi(str(abi_path))
+        else:
+            # Try to find any ABI file in the directory
+            for abi_file in Path(primary_contract.debug_dir).glob("*.abi"):
+                tracer.load_abi(str(abi_file))
+                break
+    elif ethdebug_dirs:
+        # Single contract mode (backward compatibility)
+        ethdebug_dir = ethdebug_dirs[0]
+        source_map = tracer.load_ethdebug_info(ethdebug_dir)
+        if tracer.ethdebug_info:
+            abi_path = os.path.join(ethdebug_dir, f"{tracer.ethdebug_info.contract_name}.abi")
+            if os.path.exists(abi_path):
+                tracer.load_abi(abi_path)
+        else:
+            for abi_file in Path(ethdebug_dir).glob("*.abi"):
+                tracer.load_abi(str(abi_file))
+                break
+    else:
         print('Error: --ethdebug-dir is required for simulate')
         sys.exit(1)
-    source_map = tracer.load_ethdebug_info(args.ethdebug_dir)
-    # Try to load ABI from ethdebug directory
-    if tracer.ethdebug_info:
-        abi_path = os.path.join(args.ethdebug_dir, f"{tracer.ethdebug_info.contract_name}.abi")
-        if os.path.exists(abi_path):
-            tracer.load_abi(abi_path)
-    else:
-        for abi_file in Path(args.ethdebug_dir).glob("*.abi"):
-            tracer.load_abi(str(abi_file))
-            break
-    
+
     # Find function in ABI by name and types
     func_name, func_types = parse_signature(args.function_signature)
     abi_item = None
@@ -214,10 +281,7 @@ def simulate_command(args):
     # First try exact name match
     for item in tracer.function_abis.values():
         if item['name'] == func_name:
-            # Get ABI input types
             abi_input_types = [inp['type'] for inp in item['inputs']]
-            
-            # Try to match types
             if match_abi_types(func_types, abi_input_types):
                 abi_item = item
                 break
@@ -237,16 +301,13 @@ def simulate_command(args):
                             converted_types.append('tuple')
                         else:
                             converted_types.append(parsed_type)
-                    
                     if converted_types == abi_input_types:
                         abi_item = item
                         break
-    
     if not abi_item:
         print(f'Function {args.function_signature} not found in ABI')
         print(f'Available functions: {[item["name"] for item in tracer.function_abis.values()]}')
         sys.exit(1)
-    
     input_types = [inp['type'] for inp in abi_item['inputs']]
     
     # Parse function_args from CLI to correct types
@@ -255,7 +316,6 @@ def simulate_command(args):
         sys.exit(1)
     parsed_args = []
     for val, typ, abi_input in zip(args.function_args, input_types, abi_item['inputs']):
-        # Basic type parsing
         if typ.startswith('uint') or typ.startswith('int'):
             parsed_args.append(int(val, 0))
         elif typ == 'address':
@@ -274,11 +334,9 @@ def simulate_command(args):
                     parsed_args.append(parsed_val)
             except Exception as e:
                 print(f"Error parsing tuple argument: {val} ({e})")
-                print("For structs/tuples, use Python tuple syntax, e.g. '(",")' or '([tuple1, tuple2])' for arrays of structs.")
                 sys.exit(1)
         else:
             parsed_args.append(val)
-    
     from eth_abi.abi import encode
     try:
         # For tuple types, we need to pass the full ABI input structure
@@ -286,7 +344,6 @@ def simulate_command(args):
     except Exception as e:
         print(f'Error encoding arguments: {e}')
         sys.exit(1)
-    print(encoded_args)
     
     # Calculate function selector (first 4 bytes of keccak256 hash of function signature)
     from eth_hash.auto import keccak
@@ -303,25 +360,17 @@ def simulate_command(args):
         'data': calldata,
         'value': args.value
     }
-    # Prepare trace_config
     trace_config = {"disableStorage": False, "disableMemory": False}
     if args.tx_index is not None:
         trace_config["txIndex"] = args.tx_index
-    # Block param
     block = args.block
     # Simulate call
     trace = tracer.simulate_call_trace(
         args.contract_address, args.from_addr, calldata, block, args.tx_index, args.value
     )
-    # Print trace based on mode
-    if not args.interactive:
-        if args.raw:
-            tracer.print_trace(trace, source_map, args.max_steps)
-        else:
-            function_calls = tracer.analyze_function_calls(trace)
-            tracer.print_function_trace(trace, function_calls)
-    else:
-        function_calls = tracer.analyze_function_calls(trace)
+    function_calls = tracer.analyze_function_calls(trace)
+    tracer.print_function_trace(trace, function_calls)
+
     return 0
 
 def main():
@@ -353,7 +402,9 @@ def main():
     simulate_parser.add_argument('--block', type=int, default=None, help='Block number or tag (default: latest)')
     simulate_parser.add_argument('--tx-index', type=int, default=None, help='Transaction index in block (optional)')
     simulate_parser.add_argument('--value', type=int, default=0, help='ETH value to send (in wei)')
-    simulate_parser.add_argument('--ethdebug-dir', '-e', help='ETHDebug directory containing ethdebug.json and contract debug files')
+    simulate_parser.add_argument('--ethdebug-dir', '-e', action='append', help='ETHDebug directory containing ethdebug.json and contract debug files. Can be specified multiple times for multi-contract debugging. Format: [address:]path or just path')
+    simulate_parser.add_argument('--contracts', '-c', help='JSON file mapping contract addresses to debug directories')
+    simulate_parser.add_argument('--multi-contract', action='store_true', help='Enable multi-contract debugging mode')
     simulate_parser.add_argument('--rpc-url', default='http://localhost:8545', help='RPC URL')
     
     args = parser.parse_args()
