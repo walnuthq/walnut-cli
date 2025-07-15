@@ -47,6 +47,7 @@ def trace_command(args):
     # Trace transaction
     if not args.json:
         print(f"Loading transaction {args.tx_hash}...")
+        sys.stdout.flush()  # Ensure output order
     trace = tracer.trace_transaction(args.tx_hash)
     
     # Try to find debug file if not provided
