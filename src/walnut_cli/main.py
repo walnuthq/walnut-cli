@@ -207,6 +207,12 @@ def trace_command(args):
 def simulate_command(args):
     """Execute the simulate command."""
 
+    # If --raw-data is provided, do not provide function_signature or function_args
+    if getattr(args, 'raw_data', None):
+        if getattr(args, 'function_signature', None) or (hasattr(args, 'function_args') and args.function_args):
+            print("Error: When using --raw-data, do not provide function_signature or function_args.")
+            sys.exit(1)
+
     # Create tracer
     tracer = TransactionTracer(args.rpc_url)
     source_map = {}
@@ -257,12 +263,10 @@ def simulate_command(args):
 
         # Set primary contract context for simulation
         primary_contract = multi_parser.get_contract_at_address(args.contract_address)
-        print(primary_contract)
         if not primary_contract:
             print(f"Error: Contract address {args.contract_address} not found in loaded debug info.")
             print(f"Loaded contracts: {[addr for addr in multi_parser.contracts.keys()]}")
             sys.exit(1)
-        
         tracer.ethdebug_parser = primary_contract.parser
         tracer.ethdebug_info = primary_contract.ethdebug_info
         source_map = primary_contract.parser.get_source_mapping()
@@ -291,10 +295,48 @@ def simulate_command(args):
         print('Error: --ethdebug-dir is required for simulate')
         sys.exit(1)
 
-    # Find function in ABI by name and types
+    # If raw_data is provided, use it directly as calldata
+    if getattr(args, 'raw_data', None):
+        calldata = args.raw_data
+        if calldata.startswith('0x'):
+            calldata = calldata[2:]
+        # Prepare call_obj
+        call_obj = {
+            'to': args.contract_address,
+            'from': args.from_addr,
+            'data': calldata,
+            'value': args.value
+        }
+        block = args.block
+        try:
+            trace = tracer.simulate_call_trace(
+                args.contract_address, args.from_addr, calldata, block, args.tx_index, args.value
+            )
+        except Exception as e:
+            print(f"Error during simulation: {e}")
+            sys.exit(1)
+        function_calls = tracer.analyze_function_calls(trace)
+        if getattr(args, 'json', False):
+            serializer = TraceSerializer()
+            tracer.to_addr = args.contract_address
+            json_output = serializer.serialize_trace(
+                trace,
+                function_calls,
+                getattr(tracer, 'ethdebug_info', None),
+                getattr(tracer, 'multi_contract_parser', None),
+                tracer
+            )
+            print(json.dumps(json_output, indent=2))
+        else:
+            tracer.print_function_trace(trace, function_calls)
+        return 0
+
+    # Otherwise, use function_signature and function_args
+    if not getattr(args, 'function_signature', None):
+        print('Error: function_signature is required if --raw-data is not provided')
+        sys.exit(1)
     func_name, func_types = parse_signature(args.function_signature)
     abi_item = None
-    
     # First try exact name match
     for item in tracer.function_abis.values():
         if item['name'] == func_name:
@@ -302,7 +344,6 @@ def simulate_command(args):
             if match_abi_types(func_types, abi_input_types):
                 abi_item = item
                 break
-    
     # If not found, try more flexible matching
     if not abi_item:
         for item in tracer.function_abis.values():
@@ -386,8 +427,19 @@ def simulate_command(args):
         args.contract_address, args.from_addr, calldata, block, args.tx_index, args.value
     )
     function_calls = tracer.analyze_function_calls(trace)
-    tracer.print_function_trace(trace, function_calls)
-
+    if getattr(args, 'json', False):
+        serializer = TraceSerializer()
+        tracer.to_addr = args.contract_address
+        json_output = serializer.serialize_trace(
+            trace,
+            function_calls,
+            getattr(tracer, 'ethdebug_info', None),
+            getattr(tracer, 'multi_contract_parser', None),
+            tracer
+        )
+        print(json.dumps(json_output, indent=2))
+    else:
+        tracer.print_function_trace(trace, function_calls)
     return 0
 
 def main():
@@ -414,7 +466,7 @@ def main():
     # Create the 'simulate' subcommand
     simulate_parser = subparsers.add_parser('simulate', help='Simulate and debug an Ethereum transaction')
     simulate_parser.add_argument('contract_address', help='Contract address (0x...)')
-    simulate_parser.add_argument('function_signature', help='Function signature, e.g. increment(uint256)')
+    simulate_parser.add_argument('function_signature', nargs='?', help='Function signature, e.g. increment(uint256)')
     simulate_parser.add_argument('function_args', nargs='*', help='Arguments for the function')
     simulate_parser.add_argument('--from', dest='from_addr', required=True, help='Sender address')
     simulate_parser.add_argument('--block', type=int, default=None, help='Block number or tag (default: latest)')
@@ -424,6 +476,8 @@ def main():
     simulate_parser.add_argument('--contracts', '-c', help='JSON file mapping contract addresses to debug directories')
     simulate_parser.add_argument('--multi-contract', action='store_true', help='Enable multi-contract debugging mode')
     simulate_parser.add_argument('--rpc-url', default='http://localhost:8545', help='RPC URL')
+    simulate_parser.add_argument('--json', action='store_true', help='Output trace data as JSON for web app consumption')
+    simulate_parser.add_argument('--raw-data', dest='raw_data', default=None, help='Raw calldata to send (hex string, 0x...)')
     
     args = parser.parse_args()
     
