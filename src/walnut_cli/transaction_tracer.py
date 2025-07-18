@@ -7,6 +7,7 @@ Solidity contracts on actual blockchain networks.
 
 import json
 import os
+import sys
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from web3 import Web3
@@ -94,10 +95,11 @@ class TransactionTracer:
     Traces and replays Ethereum transactions for debugging.
     """
     
-    def __init__(self, rpc_url: str = "http://localhost:8545"):
+    def __init__(self, rpc_url: str = "http://localhost:8545", quiet_mode: bool = False):
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
         if not self.w3.is_connected():
             raise ConnectionError(f"Failed to connect to {rpc_url}")
+        self.quiet_mode = quiet_mode
         
         self.source_maps = {}
         self.contracts = {}
@@ -107,13 +109,18 @@ class TransactionTracer:
         self.function_signatures = {}  # selector -> function name
         self.function_abis = {}  # selector -> full ABI item
         self.function_params = {}  # function name -> parameter info
+    
+    def _log(self, message: str, level: str = "info"):
+        """Log a message to stderr if not in quiet mode."""
+        if not self.quiet_mode:
+            print(message, file=sys.stderr)
         
     def load_debug_info(self, debug_file: str) -> Dict[int, Tuple[str, int]]:
         """Load debug info from solx output."""
         pc_to_source = {}
         
         if not os.path.exists(debug_file):
-            print(f"Warning: Debug file {debug_file} not found")
+            self._log(f"Warning: Debug file {debug_file} not found")
             return pc_to_source
         
         with open(debug_file, 'r') as f:
@@ -169,13 +176,13 @@ class TransactionTracer:
                     line, col = self.ethdebug_parser.offset_to_line_col(source_path, offset)
                     pc_to_source[instruction.offset] = (0, line)  # Use 0 as file_id for compatibility
             
-            print(f"Loaded {success(str(len(pc_to_source)))} PC mappings from ethdebug")
-            print(f"Contract: {info(self.ethdebug_info.contract_name)}")
-            print(f"Environment: {info(self.ethdebug_info.environment)}")
+            self._log(f"Loaded {success(str(len(pc_to_source)))} PC mappings from ethdebug")
+            self._log(f"Contract: {info(self.ethdebug_info.contract_name)}")
+            self._log(f"Environment: {info(self.ethdebug_info.environment)}")
             return pc_to_source
             
         except Exception as e:
-            print(f"Warning: Failed to load ethdebug info: {e}")
+            self._log(f"Warning: Failed to load ethdebug info: {e}")
             return {}
     
     def get_source_context_for_step(self, step: TraceStep, address: Optional[str] = None, context_lines: int = 2) -> Optional[Dict[str, Any]]:
@@ -766,8 +773,16 @@ class TransactionTracer:
     def decode_value(self, raw_value: str, param_type: str) -> Any:
         """Decode a raw hex value based on its type."""
         try:
+            # Handle empty or invalid values
+            if not raw_value:
+                return 0 if param_type.startswith(('uint', 'int')) else '0x'
+            
+            # Remove 0x prefix if present
+            if raw_value.startswith('0x'):
+                raw_value = raw_value[2:]
+            
             if param_type == 'uint256' or param_type.startswith('uint'):
-                return int(raw_value, 16)
+                return int(raw_value, 16) if raw_value else 0
             elif param_type == 'int256' or param_type.startswith('int'):
                 # Handle signed integers
                 value = int(raw_value, 16)
@@ -964,7 +979,7 @@ class TransactionTracer:
         # Default to internal if no external call pattern found
         return "internal"
     
-    def extract_return_value(self, trace: TransactionTrace, exit_step: int, function_name: str) -> Optional[Any]:
+    def extract_return_value(self, trace: TransactionTrace, exit_step: int, function_name: str, selector: str = None) -> Optional[Any]:
         """Extract return value from a function exit.
         
         Args:
@@ -983,23 +998,48 @@ class TransactionTracer:
         # For RETURN opcode, the return data is specified by stack[0] (offset) and stack[1] (length)
         if step.op == "RETURN" and len(step.stack) >= 2:
             try:
+                # RETURN pops offset and length from stack (in that order)
+                # The exact stack layout depends on the trace format
                 offset = int(step.stack[0], 16)
                 length = int(step.stack[1], 16)
+                
+                # Check if function has return values in ABI
+                abi = None
+                if selector and selector in self.function_abis:
+                    abi = self.function_abis[selector]
+                else:
+                    # Try to find by function name (backward compatibility)
+                    for sel, abi_item in self.function_abis.items():
+                        if abi_item.get('name') == function_name:
+                            abi = abi_item
+                            break
+                
+                if abi:
+                    outputs = abi.get('outputs', [])
+                    # If function has no outputs, return None (void function)
+                    if not outputs:
+                        return None
                 
                 if length > 0 and step.memory:
                     # Extract return data from memory
                     return_data = step.memory[offset*2:(offset+length)*2]
                     
                     # Try to decode based on function return type
-                    if function_name in self.function_abis:
-                        abi = self.function_abis[function_name]
+                    if abi:
                         outputs = abi.get('outputs', [])
                         if outputs and len(outputs) == 1:
                             output_type = outputs[0].get('type', 'bytes')
+                            # For fixed-size types, only take the required bytes
+                            if output_type.startswith(('uint', 'int', 'address', 'bool')):
+                                # These are all 32 bytes
+                                return_data = return_data[:64]  # 64 hex chars = 32 bytes
                             return self.decode_value(return_data, output_type)
                     
                     # Return raw hex if we can't decode
                     return '0x' + return_data
+                elif length == 0:
+                    # No return data - this is a void function
+                    return None
             except Exception as e:
                 print(f"Warning: Failed to extract return value: {e}")
         
@@ -1294,7 +1334,7 @@ class TransactionTracer:
                         
                         # Try to extract return value if RETURN opcode
                         if step.op == "RETURN":
-                            call.return_value = self.extract_return_value(trace, i, call.name)
+                            call.return_value = self.extract_return_value(trace, i, call.name, call.selector)
         
         # Close any remaining open calls
         for call in call_stack:
