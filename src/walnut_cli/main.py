@@ -298,8 +298,7 @@ def simulate_command(args):
     # If raw_data is provided, use it directly as calldata
     if getattr(args, 'raw_data', None):
         calldata = args.raw_data
-        if calldata.startswith('0x'):
-            calldata = calldata[2:]
+        
         # Prepare call_obj
         call_obj = {
             'to': args.contract_address,
@@ -409,7 +408,7 @@ def simulate_command(args):
     selector = keccak(function_signature.encode())[:4]
     
     # Combine selector with encoded arguments
-    calldata = selector.hex() + encoded_args.hex()
+    calldata = "0x" + selector.hex() + encoded_args.hex()
     
     # Prepare call_obj
     call_obj = {
