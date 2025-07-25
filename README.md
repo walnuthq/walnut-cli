@@ -41,7 +41,7 @@ foundryup
 
 ---
 
-### 2. Install Walnut
+### 2. Install Walnut-CLI
 
 You can install Walnut either from source (recommended) or from PyPI.
 
