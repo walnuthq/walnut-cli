@@ -11,61 +11,81 @@ A transaction-based debugger for Solidity smart contracts.
 
 **Requirements**: Solidity compiler 0.8.29+ (for ETHDebug support)
 
-## Installation
+## Installation Guide
 
-### Virtual Env (Recommended)
+### 1. Prerequisites
 
-We recommend using a virtual enviroment.
+Before installing Walnut-CLI, ensure you have the following:
 
+- **Python 3.7+** (for Walnut itself)
+- **Solidity compiler** (version 0.8.29+ for ETHDebug support)
+- **Foundry** (for contract deployment and Anvil node)
+
+**Install Solidity:**
 ```bash
-python3 -m venv MyEnv
-source MyEnv/bin/activate
-pip install -r requirements.txt
+# macOS
+brew install solidity
+# Ubuntu
+sudo apt-get install solc
+# Or download from https://github.com/ethereum/solidity/releases
+
+# Verify version (must be 0.8.29 or higher)
+solc --version
 ```
 
-### Method 1: Install from Source (Recommended)
-
+**Install Foundry:**
 ```bash
-git clone https://github.com/walnuthq/walnut-cli.git
-cd walnut-cli
-pip install -e .
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
 ```
 
-### Method 2: Install from PyPI
+---
 
-NOTE: This needs polishing.
+### 2. Install Walnut-CLI
 
+You can install Walnut either from source (recommended) or from PyPI.
+
+#### **A. Install from Source (Recommended)**
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/walnuthq/walnut-cli.git
+   cd walnut-cli
+   ```
+2. **Set up a Python virtual environment:**
+   ```bash
+   python3 -m venv MyEnv
+   source MyEnv/bin/activate
+   ```
+3. **Install Python dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. **Install Walnut-CLI in editable mode:**
+   ```bash
+   pip install -e .
+   ```
+
+#### **B. Install from PyPI**
+> **Note:** The PyPI package may be less up-to-date.
 ```bash
 pip install walnut-cli
 ```
 
-### Prerequisites
+---
 
-1. **Solidity compiler** (0.8.29+ required for ETHDebug support):
-   ```bash
-   # Install via package manager or download from https://github.com/ethereum/solidity/releases
-   brew install solidity  # macOS
-   # or
-   sudo apt-get install solc  # Ubuntu
-   
-   # Verify version (must be 0.8.29 or higher)
-   solc --version
-   ```
-
-2. **Foundry**: For contract deployment and Anvil node
-   ```bash
-   curl -L https://foundry.paradigm.xyz | bash
-   foundryup
-   ```
-
-### Setup
+### 3. Initial Setup
 
 After installation, run the setup script to configure your environment:
-```bash
-walnut-setup  # If installed via pip
-# or
-./setup-walnut.sh  # If running from source
-```
+
+- **If running from source:**
+  ```bash
+  ./setup-walnut.sh
+  ```
+- **If installed via PyPI:**
+  ```bash
+  walnut-setup
+  ```
 
 This will:
 - Check for Solidity compiler with ETHDebug support (0.8.29+)
@@ -73,10 +93,22 @@ This will:
 - Configure private key (default: Anvil's test account #0)
 - Create `walnut.config.local` with your settings
 
-Verify your setup:
+---
+
+### 4. Verify Your Setup
+
 ```bash
 ./test-setup.sh   # Test configuration (if running from source)
 ```
+
+---
+
+### 5. Next Steps
+
+- See [Usage](#usage) for how to deploy, interact, and debug contracts.
+- See [Configuration](#configuration) for advanced settings.
+
+---
 
 ## Configuration
 
