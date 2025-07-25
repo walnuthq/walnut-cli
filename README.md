@@ -82,7 +82,7 @@ After installation, run the setup script to configure your environment:
   ```bash
   ./setup-walnut.sh
   ```
-- **If installed via pip:**
+- **If installed via PyPI:**
   ```bash
   walnut-setup
   ```
