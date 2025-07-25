@@ -61,7 +61,7 @@ You can install Walnut either from source (recommended) or from PyPI.
    ```bash
    pip install -r requirements.txt
    ```
-4. **Install Walnut in editable mode:**
+4. **Install Walnut-CLI in editable mode:**
    ```bash
    pip install -e .
    ```
