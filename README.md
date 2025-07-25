@@ -15,7 +15,7 @@ A transaction-based debugger for Solidity smart contracts.
 
 ### 1. Prerequisites
 
-Before installing Walnut, ensure you have the following:
+Before installing Walnut-CLI, ensure you have the following:
 
 - **Python 3.7+** (for Walnut itself)
 - **Solidity compiler** (version 0.8.29+ for ETHDebug support)
