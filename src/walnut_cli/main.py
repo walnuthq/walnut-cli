@@ -90,17 +90,31 @@ def trace_command(args):
         if args.ethdebug_dir:
             for ethdebug_spec in args.ethdebug_dir:
                 # Parse address:path format
-                if ':' in ethdebug_spec:
-                    address, path = ethdebug_spec.split(':', 1)
-                    multi_parser.load_contract(address, path)
-                else:
-                    # Try to load from deployment.json in the directory
-                    deployment_file = Path(ethdebug_spec) / "deployment.json"
-                    if deployment_file.exists():
-                        multi_parser.load_from_deployment(deployment_file)
+                address = None
+                name = None
+                path = ethdebug_spec
+                parts = ethdebug_spec.split(':', 2)
+                if len(parts) == 3:
+                    address, name, path = parts
+                elif len(parts) == 2:
+                    address, path = parts
+                try:
+                    if address and name:
+                        multi_parser.load_contract(address, path, name)
+                    elif address:
+                        multi_parser.load_contract(address, path)
                     else:
-                        print(f"Warning: No deployment.json found in {ethdebug_spec}, skipping...")
-        
+                        # Try to load from deployment.json in the directory
+                        # NOTE: This does not make sense because the contract that we want to debug is probably already deployed
+                        # and we do not have deployment.json for it.
+                        deployment_file = Path(ethdebug_spec) / "deployment.json"
+                        if deployment_file.exists():
+                            multi_parser.load_from_deployment(deployment_file)
+                        else:
+                            print(f"Warning: No deployment.json found in {ethdebug_spec}, skipping...\n")
+                except Exception as e:
+                    print(f"Error loading contract {address or ''} from {path}: {e}\n")
+                    sys.exit(1)
         # Set the multi-contract parser on the tracer
         tracer.multi_contract_parser = multi_parser
         
@@ -240,25 +254,34 @@ def simulate_command(args):
         # Load from ethdebug directories
         if ethdebug_dirs:
             for ethdebug_spec in ethdebug_dirs:
-                if ':' in ethdebug_spec:
-                    address, path = ethdebug_spec.split(':', 1)
-                    try:
+                # New format: address[:name]:path or address:path or just path
+                address = None
+                name = None
+                path = ethdebug_spec
+                parts = ethdebug_spec.split(':', 2)
+                if len(parts) == 3:
+                    address, name, path = parts
+                elif len(parts) == 2:
+                    address, path = parts
+                # Call load_contract with address, path, name
+                try:
+                    if address and name:
+                        multi_parser.load_contract(address, path, name)
+                    elif address:
                         multi_parser.load_contract(address, path)
-                    except Exception as e:
-                        print(f"Error loading contract {address} from {path}: {e}")
-                        sys.exit(1)
-                else:
-                    deployment_file = Path(ethdebug_spec) / "deployment.json"
-                    if deployment_file.exists():
-                        try:
-                            print(f"Loading deployment.json from {ethdebug_spec}")
-                            print(f"Deployment file: {deployment_file}")
-                            multi_parser.load_from_deployment(deployment_file)
-                        except Exception as e:
-                            print(f"Error loading deployment.json from {ethdebug_spec}: {e}")
-                            sys.exit(1)
                     else:
-                        print(f"Warning: No deployment.json found in {ethdebug_spec}, skipping...")
+                        deployment_file = Path(path) / "deployment.json"
+                        if deployment_file.exists():
+                            try:
+                                multi_parser.load_from_deployment(deployment_file)
+                            except Exception as e:
+                                sys.stderr.write(f"Error loading deployment.json from {path}: {e}\n")
+                                sys.exit(1)
+                        else:
+                            sys.stderr.write(f"Warning: No deployment.json found in {path}, skipping...\n")
+                except Exception as e:
+                    sys.stderr.write(f"Error loading contract {address or ''} from {path}: {e}\n")
+                    sys.exit(1)
         tracer.multi_contract_parser = multi_parser
 
         # Set primary contract context for simulation

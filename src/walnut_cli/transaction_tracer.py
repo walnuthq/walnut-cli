@@ -8,8 +8,9 @@ Solidity contracts on actual blockchain networks.
 import json
 import os
 import sys
+from eth_utils import decode_hex
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from web3 import Web3
 from eth_utils import to_hex, to_checksum_address
 from .colors import *
@@ -32,6 +33,11 @@ class FunctionCall:
     source_line: Optional[int] = None
     stack_at_entry: Optional[List[str]] = None  # Stack state when entering function
     call_type: str = "internal"  # "external", "internal", "delegatecall", etc.
+    contract_address: Optional[str] = None
+    parent_entry_step: Optional[int] = None
+    call_id: int = 0
+    parent_call_id: Optional[int] = None
+    children_call_ids: List[int] = field(default_factory=list)
 
 @dataclass
 class StackVariable:
@@ -291,6 +297,32 @@ class TransactionTracer:
             print(f"Warning: Failed to extract address from memory at offset {offset}: {e}")
             return None
     
+    
+    def extract_calldata_from_step(self, step):
+        stack = step.stack
+        memory = step.memory
+        if len(stack) < 7 or not memory:
+            return None
+
+        # CALL: [gas, to, value, argsOffset, argsSize, retOffset, retSize]
+        args_offset = int(stack[-4], 16)
+        args_size = int(stack[-5], 16)
+
+        # If memory is a string (hex), decode it directly
+        if isinstance(memory, str):
+            # Remove '0x' if present
+            mem_hex = memory[2:] if memory.startswith('0x') else memory
+            # If odd number of characters, add '0' at the beginning
+            if len(mem_hex) % 2 != 0:
+                mem_hex = '0' + mem_hex
+            memory_bytes = decode_hex(mem_hex)
+        else:
+            # fallback for list of strings (if ever)
+            memory_bytes = b''.join(decode_hex(m[2:] if m.startswith('0x') else m) for m in memory)
+
+        calldata = memory_bytes[args_offset:args_offset + args_size]
+        return '0x' + calldata.hex()
+    
     def is_likely_memory_offset(self, value: str) -> bool:
         """Check if a stack value is likely a memory offset rather than an address.
         
@@ -342,7 +374,7 @@ class TransactionTracer:
         try:
             trace_result = self.w3.manager.request_blocking(
                 "debug_traceTransaction",
-                [tx_hash, {"disableStorage": False, "disableMemory": False}]
+                [tx_hash, {"disableStorage": False, "disableMemory": False, "enableMemory": True}]
             )
         except Exception as e:
             print(f"debug_traceTransaction not available: {e}")
@@ -1130,16 +1162,28 @@ class TransactionTracer:
         return None
     
     def analyze_function_calls(self, trace: TransactionTrace) -> List[FunctionCall]:
-        """Analyze trace to extract function calls including internal calls.
-        """
+        """Analyze trace to extract function calls including internal calls, with stable stack-based hierarchy and advanced param/ABI/debug analysis."""
         function_calls = []
-        call_stack = []  # Track active function calls
+        call_stack = []
+        next_call_id = 0
+        current_contract = trace.to_addr
+        current_depth = 0
+        context_stack = []
         
-        # Initialize execution context for entry contract in multi-contract mode
-        if self.multi_contract_parser and trace.to_addr:
-            # Push the entry contract's context onto the execution stack
-            self.multi_contract_parser.push_context(trace.to_addr, "ENTRY")
-        
+        # Track parent-child relationships properly
+        active_parents = []  # Stack of active parent call IDs
+
+        # Initialize with dispatcher
+        dispatcher_call = self._create_dispatcher_call(trace)
+        dispatcher_call.call_id = next_call_id
+        next_call_id += 1
+        function_calls.append(dispatcher_call)
+        call_stack.append(dispatcher_call)
+        active_parents.append(dispatcher_call.call_id)
+        current_depth += 1
+
+        # Track the main function entry
+        _main_selector = trace.input_data[:4] if trace.input_data else None
         # Extract function selector from transaction input data
         main_selector = None
         if trace.input_data and len(trace.input_data) >= 10:  # 0x + 8 hex chars
@@ -1149,281 +1193,95 @@ class TransactionTracer:
             else:
                 input_hex = trace.input_data
             main_selector = input_hex[:10]  # First 4 bytes (0x + 8 chars)
+
         
-        # Track function entry/exit patterns
-        function_pcs = {}  # PC -> function name mapping
-        jump_targets = {}  # Track JUMP targets
-        jump_stack_values = {}  # Track stack values at JUMP instructions
-        stack_snapshots = {}  # PC -> stack snapshot for function entries
-        
-        # Use ETHDebug to identify function boundaries if available
-        ethdebug_boundaries = {}
-        if self.ethdebug_info:
-            ethdebug_boundaries = self.identify_function_boundaries_from_ethdebug(trace)
-            # Merge ETHDebug boundaries into function_pcs
-            for pc, func_info in ethdebug_boundaries.items():
-                function_pcs[pc] = func_info['name']
-        
-        # First pass: identify all function entry points using source mappings
-        if (self.ethdebug_info or self.multi_contract_parser) and not ethdebug_boundaries:
-            # Fallback to the original method if ETHDebug boundaries weren't found
-            for i, step in enumerate(trace.steps):
-                if step.op == "JUMPDEST":
-                    # Get current contract address for multi-contract mode
-                    address = self.get_current_contract_address(trace, i) if self.multi_contract_parser else None
-                    context = self.get_source_context_for_step(step, address, context_lines=0)
-                    if context and 'function' in context.get('content', ''):
-                        # Extract function name from source
-                        content = context['content'].strip()
-                        match = re.search(r'function\s+(\w+)\s*\(', content)
-                        if match:
-                            func_name = match.group(1)
-                            function_pcs[step.pc] = func_name
-        
-        # Second pass: track execution flow and build call stack
-        current_depth = 0
-        external_call_depth = 0  # Track depth changes from external calls
-        
+        # Find the main function entry
         for i, step in enumerate(trace.steps):
-            # Handle external calls (CALL, DELEGATECALL, STATICCALL)
+            # Handle cross-contract calls
             if step.op in ["CALL", "DELEGATECALL", "STATICCALL"]:
-                # Extract call parameters from stack
-                if len(step.stack) >= 7:  # CALL requires 7 stack items
-                    gas = int(step.stack[0], 16)
-                    raw_addr_value = step.stack[1]
-                    value = int(step.stack[2], 16) if step.op == "CALL" else 0
-                    
-                    # Check if this might be a memory offset (--via-ir pattern)
-                    if self.is_likely_memory_offset(raw_addr_value) and step.memory:
-                        # Try to extract the actual address from memory
-                        offset = int(raw_addr_value, 16)
-                        actual_addr = self.extract_address_from_memory(step.memory, offset)
-                        if actual_addr:
-                            to_addr = actual_addr
-                            print(f"Debug: Resolved address from memory offset 0x{offset:x}: {to_addr}")
+                call = self._process_external_call(step, i, current_contract, current_depth)
+                if call:
+                    call.call_id = next_call_id
+                    call.parent_call_id = call_stack[-1].call_id if call_stack else None
+                    if call_stack:
+                        # Only add as child if the depth is greater than parent
+                        parent_call = call_stack[-1]
+                        if call.depth > parent_call.depth:
+                            parent_call.children_call_ids.append(call.call_id)
                         else:
-                            # For --via-ir optimized code, we might need to detect the actual
-                            # target by looking at what contract executes after the CALL
-                            # For now, mark it as unknown and resolve it later
-                            to_addr = self.extract_address_from_stack(raw_addr_value)
-                            
-                            # Special handling for via-ir low addresses
-                            if int(raw_addr_value, 16) < 0x1000:
-                                # Look ahead to see what contract actually executes
-                                if i + 1 < len(trace.steps) and trace.steps[i + 1].depth > step.depth:
-                                    # External call succeeded, try to determine target from context
-                                    # This will be resolved when we detect the depth increase
-                                    to_addr = f"0x{int(raw_addr_value, 16):040x}"  # Placeholder
-                    else:
-                        # Normal address extraction
-                        to_addr = self.extract_address_from_stack(raw_addr_value)
-                    
-                    # Push context if in multi-contract mode
-                    if self.multi_contract_parser:
-                        self.multi_contract_parser.push_context(to_addr, step.op)
-                    
-                    # Format call name with proper address display
-                    addr_display = self.format_address_display(to_addr, short=True)
-                    call_name = f"{step.op.lower()}_to_{addr_display}"
-                    
-                    # Create external call entry
-                    external_call = FunctionCall(
-                        name=call_name,
-                        selector="",
-                        entry_step=i,
-                        exit_step=None,
-                        gas_used=0,
-                        depth=len(call_stack),
-                        args=[("to", to_addr), ("value", value), ("gas", gas)],
-                        source_line=None,
-                        stack_at_entry=step.stack.copy() if step.stack else [],
-                        call_type=step.op
-                    )
-                    call_stack.append(external_call)
-                    function_calls.append(external_call)
-                    external_call_depth += 1
-            
-            # Check for external call execution (depth increase)
-            if i > 0 and step.depth > trace.steps[i-1].depth:
-                # We've entered an external call
-                # Check if the previous call had an unresolved address (via-ir pattern)
-                if call_stack and call_stack[-1].call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
-                    recent_call = call_stack[-1]
-                    # Check if this was a via-ir optimized call with low address
-                    if recent_call.args and len(recent_call.args) > 0:
-                        to_param = recent_call.args[0]  # ("to", address)
-                        if len(to_param) > 1 and isinstance(to_param[1], str):
-                            try:
-                                addr_val = int(to_param[1], 16) if to_param[1].startswith('0x') else int(to_param[1], 16)
-                                if addr_val < 0x1000:  # Likely a via-ir optimization
-                                    # Try to determine the actual contract from the source mapping
-                                    if self.multi_contract_parser:
-                                        # Check which contract's code is executing
-                                        actual_addr = self.detect_executing_contract(trace, i)
-                                        if actual_addr and actual_addr != to_param[1]:
-                                            # Update the call with the actual address
-                                            recent_call.args[0] = ("to", actual_addr)
-                                            recent_call.name = f"{recent_call.call_type.lower()}_to_{self.format_address_display(actual_addr, short=True)}"
-                                            # Update the context stack
-                                            self.multi_contract_parser.pop_context()
-                                            self.multi_contract_parser.push_context(actual_addr, recent_call.call_type)
-                            except ValueError:
-                                pass
-            
-            # Check for external call returns (depth decrease)
-            if i > 0 and step.depth < trace.steps[i-1].depth:
-                # External call has returned
-                if call_stack and external_call_depth > 0:
-                    # Pop context if in multi-contract mode
-                    if self.multi_contract_parser:
-                        self.multi_contract_parser.pop_context()
-                    
-                    # Find the most recent external call
-                    for j in range(len(call_stack) - 1, -1, -1):
-                        if call_stack[j].call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
-                            call = call_stack.pop(j)
-                            call.exit_step = i
-                            call.gas_used = trace.steps[call.entry_step].gas - step.gas
-                            # Check if there's a return value
-                            if i < len(trace.steps) - 1 and trace.steps[i+1].stack:
-                                # Return value is pushed to stack after external call
-                                call.return_value = int(trace.steps[i+1].stack[0], 16) if trace.steps[i+1].stack else None
-                            external_call_depth -= 1
-                            break
-            
-            # Track JUMP targets and stack values
-            if step.op == "JUMP" and step.stack:
-                jump_target = int(step.stack[0], 16)
-                jump_targets[i+1] = jump_target
-                # Store stack values (excluding the jump target itself)
-                # Parameters are typically at stack[1], stack[2], etc.
-                if len(step.stack) > 1:
-                    jump_stack_values[jump_target] = step.stack[1:]
-            
-            # Detect function entries
-            if step.op == "JUMPDEST":
-                # Save stack snapshot at this PC
-                stack_snapshots[step.pc] = step.stack.copy() if step.stack else []
-                
-                # Check if we jumped here from a JUMP
-                jumped_from = None
-                for j in range(max(0, i-10), i):
-                    if j+1 in jump_targets and jump_targets[j+1] == step.pc:
-                        jumped_from = j
-                        break
-                
-                # Check if this is a function entry
-                if step.pc in function_pcs or (self.ethdebug_info and jumped_from is not None):
-                    func_name = function_pcs.get(step.pc)
-                    
-                    if not func_name and self.ethdebug_info:
-                        # Try to get function name from source context
-                        context = self.ethdebug_parser.get_source_context(step.pc, context_lines=5)
-                        if context:
-                            # Look for function declaration in context
-                            for line in context.get('context_lines', []):
-                                match = re.search(r'function\s+(\w+)\s*\(', line)
-                                if match:
-                                    func_name = match.group(1)
+                            # Find the correct parent based on depth
+                            for j in range(len(call_stack) - 1, -1, -1):
+                                potential_parent = call_stack[j]
+                                if call.depth > potential_parent.depth:
+                                    potential_parent.children_call_ids.append(call.call_id)
                                     break
-                    
-                    if func_name:
-                        # Only create a new function entry if:
-                        # 1. We jumped here (not just a JUMPDEST in sequence), OR
-                        # 2. This PC is explicitly marked as a function entry in function_pcs
-                        # AND we're not already in a function with the same name at a nearby location
-                        
-                        should_create_entry = False
-                        
-                        # Check if this is a real function entry (either jumped to or marked in function_pcs)
-                        if jumped_from is not None or step.pc in function_pcs:
-                            # Check if we're already inside this function
-                            already_in_function = False
-                            for existing_call in call_stack:
-                                if existing_call.name == func_name and existing_call.exit_step is None:
-                                    # For the same function, check if we're in a loop/internal jump
-                                    # by seeing if the PC is close to the existing entry
-                                    if step.pc > existing_call.entry_step:
-                                        # We're after the function entry, likely still in the same function
-                                        already_in_function = True
-                                        break
-                            
-                            should_create_entry = not already_in_function
-                        
-                        if should_create_entry:
-                            # This is a function entry
-                            source_line = None
-                            if self.ethdebug_info:
-                                context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
-                                if context:
-                                    source_line = context['line']
-                            
-                            # Try to get parameters from current stack state
+                    next_call_id += 1
+                    function_calls.append(call)
+                    call_stack.append(call)
+                    context_stack.append({
+                        'contract': current_contract,
+                        'depth': current_depth,
+                        'return_pc': step.pc + 1
+                    })
+                    current_contract = call.contract_address
+                    current_depth += 1
+            # Internal functions
+            elif step.op == "JUMPDEST":
+                call = self._detect_internal_call(step, i, current_contract, call_stack)
+                if call:
+                    call.call_id = next_call_id
+                    call.parent_call_id = call_stack[-1].call_id if call_stack else None
+                    if call and hasattr(self, 'ethdebug_info') and self.ethdebug_info:
+                        # Pronađi ABI entry po imenu (ako nije overload)
+                        abi_entry = None
+                        for sel, abi in self.function_abis.items():
+                            if abi.get('name') == call.name:
+                                abi_entry = abi
+                                break
+                        if abi_entry:
                             args = []
-                            current_stack = step.stack if step.stack else []
-                            
-                            if func_name in self.function_params:
-                                params_info = self.function_params[func_name]
-                                
-                                # For internal calls, try to find parameters by looking backwards
-                                for idx, param_info in enumerate(params_info):
-                                    param_name = param_info.get('name', f'param{idx}')
-                                    param_type = param_info.get('type', 'unknown')
-                                    
-                                    # First try ETHDebug if available
-                                    param_value = None
-                                    if self.ethdebug_info:
-                                        param_value = self.find_parameter_value_from_ethdebug(trace, i, param_name, param_type)
-                                    
-                                    # Fallback to heuristics if ETHDebug didn't work
-                                    if param_value is None:
-                                        param_value = self.find_parameter_value_on_stack(trace, i, idx, param_type, func_name)
-                                    
-                                    if param_value is not None:
-                                        args.append((param_name, param_value))
-                                    else:
-                                        # No reliable way to determine parameter value
-                                        args.append((param_name, '<unknown>'))
-                            
-                            # Detect the call type using ETHDebug-enhanced method
-                            call_type = self.detect_call_type(trace, i)
-                            
-                            call = FunctionCall(
-                                name=func_name,
-                                selector="",  # Internal calls don't have selectors
-                                entry_step=i,
-                                exit_step=None,  # Will be filled later
-                                gas_used=0,  # Will be calculated later
-                                depth=len(call_stack),
-                                args=args,
-                                source_line=source_line,
-                                stack_at_entry=current_stack.copy(),
-                                call_type=call_type  # Use detected call type
-                            )
-                            call_stack.append(call)
-                            function_calls.append(call)
+                            for param in abi_entry.get('inputs', []):
+                                value = self.find_parameter_value_from_ethdebug(trace, i, param['name'], param['type'])
+                                args.append((param['name'], value))
+                            call.args = args
+                    if call_stack:
+                        # Only add as child if the depth is greater than parent
+                        parent_call = call_stack[-1]
+                        if call.depth > parent_call.depth:
+                            parent_call.children_call_ids.append(call.call_id)
+                        else:
+                            # Find the correct parent based on depth
+                            for j in range(len(call_stack) - 1, -1, -1):
+                                potential_parent = call_stack[j]
+                                if call.depth > potential_parent.depth:
+                                    potential_parent.children_call_ids.append(call.call_id)
+                                    break
+                    next_call_id += 1
+                    function_calls.append(call)
+                    call_stack.append(call)
+            # Exit from function
+            elif step.op in ["RETURN", "REVERT", "STOP"]:
+                while call_stack:
+                    call = call_stack.pop()
+                    call.exit_step = i
+                    call.gas_used = trace.steps[call.entry_step].gas - step.gas
+                    if call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
+                        if context_stack:
+                            context = context_stack.pop()
+                            current_contract = context['contract']
+                            current_depth = context['depth']
+                            self._track_return_location(context['return_pc'])
+                        break
+                    else:
+                        current_depth = max(0, current_depth - 1)
             
-            # Detect function exits (JUMP back or STOP/RETURN)
-            if call_stack and (step.op in ["STOP", "RETURN", "REVERT"] or 
-                               (step.op == "JUMP" and i < len(trace.steps) - 1)):
-                # Check if we're returning from a function
-                # For JUMP, we'd need more sophisticated analysis
-                if step.op in ["STOP", "RETURN", "REVERT"]:
-                    # End all remaining calls
-                    while call_stack:
-                        call = call_stack.pop()
-                        call.exit_step = i
-                        call.gas_used = trace.steps[call.entry_step].gas - step.gas
-                        
-                        # Try to extract return value if RETURN opcode
-                        if step.op == "RETURN":
-                            call.return_value = self.extract_return_value(trace, i, call.name, call.selector)
-        
-        # Close any remaining open calls
+            
+            
+         
         for call in call_stack:
             call.exit_step = len(trace.steps) - 1
             call.gas_used = trace.steps[call.entry_step].gas - trace.steps[-1].gas
-        
+            
         # Handle the main entry function specially
         if main_selector:
             function_info = self.function_signatures.get(main_selector)
@@ -1480,71 +1338,580 @@ class TransactionTracer:
                                 for call in function_calls[1:]:
                                     call.depth += 1
                                 break
-        
-        # Always add the contract entry point first
-        if len(trace.steps) > 0:
-            # Determine if this is contract creation or runtime
-            # In multi-contract mode, use the actual target contract
-            if self.multi_contract_parser and trace.to_addr:
-                target_contract = self.multi_contract_parser.get_contract_at_address(trace.to_addr)
-                if target_contract:
-                    contract_name = target_contract.name
-                    is_create = target_contract.ethdebug_info.environment == 'create'
-                else:
-                    contract_name = 'Contract'
-                    is_create = False
-            else:
-                contract_name = self.ethdebug_info.contract_name if self.ethdebug_info else 'Contract'
-                is_create = self.ethdebug_info and self.ethdebug_info.environment == 'create'
-            
-            if is_create:
-                entry_name = f"{contract_name}::constructor"
-            else:
-                entry_name = f"{contract_name}::runtime_dispatcher"
-            
-            # Get source location for contract definition
-            source_line = None
-            if self.multi_contract_parser and trace.to_addr:
-                # Multi-contract mode: get source from the target contract
-                contract_info = self.multi_contract_parser.get_contract_at_address(trace.to_addr)
-                if contract_info:
-                    for step in trace.steps[:10]:
-                        context = contract_info.parser.get_source_context(step.pc, context_lines=0)
-                        if context and 'contract' in context.get('content', ''):
-                            source_line = context['line']
-                            break
-            elif self.ethdebug_info:
-                # Single contract mode
-                for step in trace.steps[:10]:
-                    context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
-                    if context and 'contract' in context.get('content', ''):
-                        source_line = context['line']
-                        break
-            
-            # Add contract entry point
-            entry_call = FunctionCall(
-                name=entry_name,
-                selector="",
-                entry_step=0,
-                exit_step=function_calls[0].entry_step - 1 if function_calls else len(trace.steps) - 1,
-                gas_used=trace.steps[0].gas - (trace.steps[function_calls[0].entry_step - 1].gas if function_calls else trace.steps[-1].gas),
-                depth=0,
-                args=[],
-                source_line=source_line,
-                call_type="entry"  # Contract entry point (dispatcher/constructor)
-            )
-            function_calls.insert(0, entry_call)
-            
-            # Adjust depth of all other calls
-            for call in function_calls[1:]:
-                call.depth += 1
-        
-        # Clean up execution context for entry contract in multi-contract mode
-        if self.multi_contract_parser and trace.to_addr:
-            # Pop the entry contract's context from the execution stack
-            self.multi_contract_parser.pop_context()
-        
+
         return function_calls
+
+   
+    def _detect_internal_call(self, step, step_idx, current_contract, call_stack):
+        """Detect internal function calls using proper execution context."""
+        # Get source context
+        context = self.get_source_context_for_step(step, current_contract)
+        if not context:
+            return None
+
+        # Get function name safely
+        func_name = self._extract_function_name(context.get('content', ''))
+        if not func_name:
+            return None
+
+        # Avoid duplicate entries for the same function at the same contract that are not closed
+        already_open = any(
+            fc.name == func_name and fc.contract_address == current_contract and fc.exit_step is None
+            for fc in call_stack
+        )
+        if already_open:
+            return None
+        current_func = call_stack[-1].name if call_stack else None
+
+        return FunctionCall(
+            name=func_name,
+            selector="",
+            entry_step=step_idx,
+            exit_step=None,
+            gas_used=0,
+            depth=len(call_stack),
+            args=[],
+            call_type="internal",
+            contract_address=current_contract,
+            source_line=context.get('line')
+        )
+
+    # Helper Methods
+    def _track_return_location(self, return_pc: int):
+        """Track where execution should return after external call."""
+        # This would be implemented to mark the expected return location
+        # so we can properly detect when execution returns to the caller
+        pass
+
+    def _create_dispatcher_call(self, trace: TransactionTrace) -> FunctionCall:
+        """Create the initial dispatcher call entry."""
+        contract_name = None
+        source_line = None
+        
+        if self.multi_contract_parser and trace.to_addr:
+            contract_info = self.multi_contract_parser.get_contract_at_address(trace.to_addr)
+            if contract_info:
+                contract_name = contract_info.name
+                source_line = self._find_contract_definition_line(contract_info)
+        elif self.ethdebug_info:
+            contract_name = self.ethdebug_info.contract_name
+        if not contract_name:
+            contract_name = "Contract"
+
+        return FunctionCall(
+            name=f"{contract_name}::runtime_dispatcher",
+            selector="",
+            entry_step=0,
+            exit_step=len(trace.steps)-1,
+            gas_used=trace.gas_used,
+            depth=0,
+            args=[],
+            call_type="entry",
+            contract_address=trace.to_addr,
+            source_line=source_line
+        )
+
+    def _extract_function_name(self, source_line: str) -> Optional[str]:
+        """Safely extract function name from source line with proper error handling."""
+        if not source_line:
+            return None
+
+        patterns = [
+            (r'function\s+(\w+)\s*\(', 'function'),
+            (r'constructor\s*\(', 'constructor'),
+            (r'fallback\s*\(\s*\)', 'fallback'),
+            (r'receive\s*\(\s*\)\s*(external)?', 'receive')
+        ]
+        
+        for pattern, pattern_type in patterns:
+            try:
+                match = re.search(pattern, source_line)
+                if match:
+                    if pattern_type == 'constructor':
+                        return 'constructor'
+                    elif pattern_type == 'fallback':
+                        return 'fallback'
+                    elif pattern_type == 'receive':
+                        return 'receive'
+                    elif match.lastindex >= 1:  # Ensure group exists
+                        return match.group(1)
+            except Exception:
+                continue
+        
+        return None
+
+
+    def _process_external_call(self, step: TraceStep, step_idx: int, 
+                            current_contract: str, current_depth: int) -> Optional[FunctionCall]:
+        """Process CALL/DELEGATECALL/STATICCALL operations."""
+        if len(step.stack) < 7:
+            return None
+
+        # Extract call parameters
+        to_addr = self.extract_address_from_stack(step.stack[-2])
+        value = int(step.stack[-3], 16) if step.op == "CALL" else 0
+        gas = int(step.stack[-1], 16)
+        calldata = self.extract_calldata_from_step(step)
+
+        # Get contract name if available
+        contract_name = self.format_address_display(to_addr)
+        if self.multi_contract_parser:
+            contract_info = self.multi_contract_parser.get_contract_at_address(to_addr)
+            if contract_info:
+                contract_name = contract_info.name
+
+        # Try to decode function signature
+        func_name = "unknown"
+        if calldata and len(calldata) >= 10:  # 0x + 4 bytes
+            selector = calldata[:10]
+            if selector in self.function_signatures:
+                func_name = self.function_signatures[selector]['name']
+            else:
+                # Try 4byte directory lookup
+                func_name = self.lookup_function_signature(selector) or f"function_{selector}"
+
+        return FunctionCall(
+            name=f"{step.op} → {contract_name}::{func_name}",
+            selector=calldata[:10] if calldata else "",
+            entry_step=step_idx,
+            exit_step=None,
+            gas_used=0,
+            depth=current_depth + 1,
+            args=[("to", to_addr), ("value", value), ("gas", gas)],
+            call_type=step.op,
+            contract_address=to_addr
+        )
+
+    
+    def _find_contract_definition_line(self, contract_info) -> Optional[int]:
+        """Find the source line where contract is defined."""
+        if not contract_info.ethdebug_info:
+            return None
+        
+        # Search first few instructions for contract definition
+        for pc in contract_info.ethdebug_info.instructions[:20]:
+            context = contract_info.parser.get_source_context(pc.offset, context_lines=5)
+            if context and 'contract ' in context.get('content', ''):
+                return context['line']
+        return None
+
+
+    # def _analyze_function_calls(self, trace: TransactionTrace) -> List[FunctionCall]:
+    #     """Analyze trace to extract function calls including internal calls.
+    #     """
+    #     function_calls = []
+    #     call_stack = []  # Track active function calls
+        
+    #     # Initialize execution context for entry contract in multi-contract mode
+    #     if self.multi_contract_parser and trace.to_addr:
+    #         # Push the entry contract's context onto the execution stack
+    #         self.multi_contract_parser.push_context(trace.to_addr, "ENTRY")
+        
+    #     # Extract function selector from transaction input data
+    #     main_selector = None
+    #     if trace.input_data and len(trace.input_data) >= 10:  # 0x + 8 hex chars
+    #         # Ensure we're working with hex string, not bytes
+    #         if isinstance(trace.input_data, bytes):
+    #             input_hex = '0x' + trace.input_data.hex()
+    #         else:
+    #             input_hex = trace.input_data
+    #         main_selector = input_hex[:10]  # First 4 bytes (0x + 8 chars)
+        
+    #     # Track function entry/exit patterns
+    #     function_pcs = {}  # PC -> function name mapping
+    #     jump_targets = {}  # Track JUMP targets
+    #     jump_stack_values = {}  # Track stack values at JUMP instructions
+    #     stack_snapshots = {}  # PC -> stack snapshot for function entries
+        
+    #     # Use ETHDebug to identify function boundaries if available
+    #     ethdebug_boundaries = {}
+    #     if self.ethdebug_info:
+    #         ethdebug_boundaries = self.identify_function_boundaries_from_ethdebug(trace)
+    #         # Merge ETHDebug boundaries into function_pcs
+    #         for pc, func_info in ethdebug_boundaries.items():
+    #             function_pcs[pc] = func_info['name']
+        
+    #     # First pass: identify all function entry points using source mappings
+    #     if (self.ethdebug_info or self.multi_contract_parser) and not ethdebug_boundaries:
+    #         # Fallback to the original method if ETHDebug boundaries weren't found
+    #         for i, step in enumerate(trace.steps):
+    #             if step.op == "JUMPDEST":
+    #                 # Get current contract address for multi-contract mode
+    #                 address = self.get_current_contract_address(trace, i) if self.multi_contract_parser else None
+    #                 context = self.get_source_context_for_step(step, address, context_lines=0)
+    #                 if context and 'function' in context.get('content', ''):
+    #                     # Extract function name from source
+    #                     content = context['content'].strip()
+    #                     match = re.search(r'function\s+(\w+)\s*\(', content)
+    #                     if match:
+    #                         func_name = match.group(1)
+    #                         function_pcs[step.pc] = func_name
+        
+    #     # Second pass: track execution flow and build call stack
+    #     current_depth = 0
+    #     external_call_depth = 0  # Track depth changes from external calls
+        
+    #     for i, step in enumerate(trace.steps):
+    #         # Handle external calls (CALL, DELEGATECALL, STATICCALL)
+    #         if step.op in ["CALL", "DELEGATECALL", "STATICCALL"]:
+    #             # Extract call parameters from stack
+    #             if len(step.stack) >= 7:  # CALL requires 7 stack items
+    #                 gas = int(step.stack[0], 16)
+    #                 raw_addr_value = step.stack[1]
+    #                 value = int(step.stack[2], 16) if step.op == "CALL" else 0
+                    
+    #                 # Check if this might be a memory offset (--via-ir pattern)
+    #                 if self.is_likely_memory_offset(raw_addr_value) and step.memory:
+    #                     # Try to extract the actual address from memory
+    #                     offset = int(raw_addr_value, 16)
+    #                     actual_addr = self.extract_address_from_memory(step.memory, offset)
+    #                     if actual_addr:
+    #                         to_addr = actual_addr
+    #                         print(f"Debug: Resolved address from memory offset 0x{offset:x}: {to_addr}")
+    #                     else:
+    #                         # For --via-ir optimized code, we might need to detect the actual
+    #                         # target by looking at what contract executes after the CALL
+    #                         # For now, mark it as unknown and resolve it later
+    #                         to_addr = self.extract_address_from_stack(raw_addr_value)
+                            
+    #                         # Special handling for via-ir low addresses
+    #                         if int(raw_addr_value, 16) < 0x1000:
+    #                             # Look ahead to see what contract actually executes
+    #                             if i + 1 < len(trace.steps) and trace.steps[i + 1].depth > step.depth:
+    #                                 # External call succeeded, try to determine target from context
+    #                                 # This will be resolved when we detect the depth increase
+    #                                 to_addr = f"0x{int(raw_addr_value, 16):040x}"  # Placeholder
+    #                 else:
+    #                     # Normal address extraction
+    #                     to_addr = self.extract_address_from_stack(raw_addr_value)
+                    
+    #                 # Push context if in multi-contract mode
+    #                 if self.multi_contract_parser:
+    #                     self.multi_contract_parser.push_context(to_addr, step.op)
+                    
+    #                 # Format call name with proper address display
+    #                 addr_display = self.format_address_display(to_addr, short=True)
+    #                 call_name = f"{step.op.lower()}_to_{addr_display}"
+                    
+    #                 # Create external call entry
+    #                 external_call = FunctionCall(
+    #                     name=call_name,
+    #                     selector="",
+    #                     entry_step=i,
+    #                     exit_step=None,
+    #                     gas_used=0,
+    #                     depth=len(call_stack),
+    #                     args=[("to", to_addr), ("value", value), ("gas", gas)],
+    #                     source_line=None,
+    #                     stack_at_entry=step.stack.copy() if step.stack else [],
+    #                     call_type=step.op
+    #                 )
+    #                 call_stack.append(external_call)
+    #                 function_calls.append(external_call)
+    #                 external_call_depth += 1
+            
+    #         # Check for external call execution (depth increase)
+    #         if i > 0 and step.depth > trace.steps[i-1].depth:
+    #             # We've entered an external call
+    #             # Check if the previous call had an unresolved address (via-ir pattern)
+    #             if call_stack and call_stack[-1].call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
+    #                 recent_call = call_stack[-1]
+    #                 # Check if this was a via-ir optimized call with low address
+    #                 if recent_call.args and len(recent_call.args) > 0:
+    #                     to_param = recent_call.args[0]  # ("to", address)
+    #                     if len(to_param) > 1 and isinstance(to_param[1], str):
+    #                         try:
+    #                             addr_val = int(to_param[1], 16) if to_param[1].startswith('0x') else int(to_param[1], 16)
+    #                             if addr_val < 0x1000:  # Likely a via-ir optimization
+    #                                 # Try to determine the actual contract from the source mapping
+    #                                 if self.multi_contract_parser:
+    #                                     # Check which contract's code is executing
+    #                                     actual_addr = self.detect_executing_contract(trace, i)
+    #                                     if actual_addr and actual_addr != to_param[1]:
+    #                                         # Update the call with the actual address
+    #                                         recent_call.args[0] = ("to", actual_addr)
+    #                                         recent_call.name = f"{recent_call.call_type.lower()}_to_{self.format_address_display(actual_addr, short=True)}"
+    #                                         # Update the context stack
+    #                                         self.multi_contract_parser.pop_context()
+    #                                         self.multi_contract_parser.push_context(actual_addr, recent_call.call_type)
+    #                         except ValueError:
+    #                             pass
+            
+    #         # Check for external call returns (depth decrease)
+    #         if i > 0 and step.depth < trace.steps[i-1].depth:
+    #             # External call has returned
+    #             if call_stack and external_call_depth > 0:
+    #                 # Pop context if in multi-contract mode
+    #                 if self.multi_contract_parser:
+    #                     self.multi_contract_parser.pop_context()
+                    
+    #                 # Find the most recent external call
+    #                 for j in range(len(call_stack) - 1, -1, -1):
+    #                     if call_stack[j].call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
+    #                         call = call_stack.pop(j)
+    #                         call.exit_step = i
+    #                         call.gas_used = trace.steps[call.entry_step].gas - step.gas
+    #                         # Check if there's a return value
+    #                         if i < len(trace.steps) - 1 and trace.steps[i+1].stack:
+    #                             # Return value is pushed to stack after external call
+    #                             call.return_value = int(trace.steps[i+1].stack[0], 16) if trace.steps[i+1].stack else None
+    #                         external_call_depth -= 1
+    #                         break
+            
+    #         # Track JUMP targets and stack values
+    #         if step.op == "JUMP" and step.stack:
+    #             jump_target = int(step.stack[0], 16)
+    #             jump_targets[i+1] = jump_target
+    #             # Store stack values (excluding the jump target itself)
+    #             # Parameters are typically at stack[1], stack[2], etc.
+    #             if len(step.stack) > 1:
+    #                 jump_stack_values[jump_target] = step.stack[1:]
+            
+    #         # Detect function entries
+    #         if step.op == "JUMPDEST":
+    #             # Save stack snapshot at this PC
+    #             stack_snapshots[step.pc] = step.stack.copy() if step.stack else []
+                
+    #             # Check if we jumped here from a JUMP
+    #             jumped_from = None
+    #             for j in range(max(0, i-10), i):
+    #                 if j+1 in jump_targets and jump_targets[j+1] == step.pc:
+    #                     jumped_from = j
+    #                     break
+                
+    #             # Check if this is a function entry
+    #             if step.pc in function_pcs or (self.ethdebug_info and jumped_from is not None):
+    #                 func_name = function_pcs.get(step.pc)
+                    
+    #                 if not func_name and self.ethdebug_info:
+    #                     # Try to get function name from source context
+    #                     context = self.ethdebug_parser.get_source_context(step.pc, context_lines=5)
+    #                     if context:
+    #                         # Look for function declaration in context
+    #                         for line in context.get('context_lines', []):
+    #                             match = re.search(r'function\s+(\w+)\s*\(', line)
+    #                             if match:
+    #                                 func_name = match.group(1)
+    #                                 break
+                    
+    #                 if func_name:
+    #                     # Only create a new function entry if:
+    #                     # 1. We jumped here (not just a JUMPDEST in sequence), OR
+    #                     # 2. This PC is explicitly marked as a function entry in function_pcs
+    #                     # AND we're not already in a function with the same name at a nearby location
+                        
+    #                     should_create_entry = False
+                        
+    #                     # Check if this is a real function entry (either jumped to or marked in function_pcs)
+    #                     if jumped_from is not None or step.pc in function_pcs:
+    #                         # Check if we're already inside this function
+    #                         already_in_function = False
+    #                         for existing_call in call_stack:
+    #                             if existing_call.name == func_name and existing_call.exit_step is None:
+    #                                 # For the same function, check if we're in a loop/internal jump
+    #                                 # by seeing if the PC is close to the existing entry
+    #                                 if step.pc > existing_call.entry_step:
+    #                                     # We're after the function entry, likely still in the same function
+    #                                     already_in_function = True
+    #                                     break
+                            
+    #                         should_create_entry = not already_in_function
+                        
+    #                     if should_create_entry:
+    #                         # This is a function entry
+    #                         source_line = None
+    #                         if self.ethdebug_info:
+    #                             context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
+    #                             if context:
+    #                                 source_line = context['line']
+                            
+    #                         # Try to get parameters from current stack state
+    #                         args = []
+    #                         current_stack = step.stack if step.stack else []
+                            
+    #                         if func_name in self.function_params:
+    #                             params_info = self.function_params[func_name]
+                                
+    #                             # For internal calls, try to find parameters by looking backwards
+    #                             for idx, param_info in enumerate(params_info):
+    #                                 param_name = param_info.get('name', f'param{idx}')
+    #                                 param_type = param_info.get('type', 'unknown')
+                                    
+    #                                 # First try ETHDebug if available
+    #                                 param_value = None
+    #                                 if self.ethdebug_info:
+    #                                     param_value = self.find_parameter_value_from_ethdebug(trace, i, param_name, param_type)
+                                    
+    #                                 # Fallback to heuristics if ETHDebug didn't work
+    #                                 if param_value is None:
+    #                                     param_value = self.find_parameter_value_on_stack(trace, i, idx, param_type, func_name)
+                                    
+    #                                 if param_value is not None:
+    #                                     args.append((param_name, param_value))
+    #                                 else:
+    #                                     # No reliable way to determine parameter value
+    #                                     args.append((param_name, '<unknown>'))
+                            
+    #                         # Detect the call type using ETHDebug-enhanced method
+    #                         call_type = self.detect_call_type(trace, i)
+                            
+    #                         call = FunctionCall(
+    #                             name=func_name,
+    #                             selector="",  # Internal calls don't have selectors
+    #                             entry_step=i,
+    #                             exit_step=None,  # Will be filled later
+    #                             gas_used=0,  # Will be calculated later
+    #                             depth=len(call_stack),
+    #                             args=args,
+    #                             source_line=source_line,
+    #                             stack_at_entry=current_stack.copy(),
+    #                             call_type=call_type  # Use detected call type
+    #                         )
+    #                         call_stack.append(call)
+    #                         function_calls.append(call)
+            
+    #         # Detect function exits (JUMP back or STOP/RETURN)
+    #         if call_stack and (step.op in ["STOP", "RETURN", "REVERT"] or 
+    #                            (step.op == "JUMP" and i < len(trace.steps) - 1)):
+    #             # Check if we're returning from a function
+    #             # For JUMP, we'd need more sophisticated analysis
+    #             if step.op in ["STOP", "RETURN", "REVERT"]:
+    #                 # End all remaining calls
+    #                 while call_stack:
+    #                     call = call_stack.pop()
+    #                     call.exit_step = i
+    #                     call.gas_used = trace.steps[call.entry_step].gas - step.gas
+                        
+    #                     # Try to extract return value if RETURN opcode
+    #                     if step.op == "RETURN":
+    #                         call.return_value = self.extract_return_value(trace, i, call.name, call.selector)
+        
+    #     # Close any remaining open calls
+    #     for call in call_stack:
+    #         call.exit_step = len(trace.steps) - 1
+    #         call.gas_used = trace.steps[call.entry_step].gas - trace.steps[-1].gas
+        
+    #     # Handle the main entry function specially
+    #     if main_selector:
+    #         function_info = self.function_signatures.get(main_selector)
+    #         if function_info:
+    #             main_function_name = function_info['name']
+    #         else:
+    #             # Try to look up from 4byte.directory
+    #             signature = self.lookup_function_signature(main_selector)
+    #             if signature:
+    #                 main_function_name = signature
+    #             else:
+    #                 main_function_name = f"function_{main_selector}"
+            
+    #         # Find the main function in our detected calls
+    #         main_func_found = False
+    #         for call in function_calls:
+    #             if call.name in main_function_name or main_function_name.startswith(call.name + "("):
+    #                 call.selector = main_selector
+    #                 # Decode parameters from calldata
+    #                 call.args = self.decode_function_parameters(main_selector, trace.input_data)
+    #                 call.call_type = "external"  # This is the external entry point
+    #                 main_func_found = True
+    #                 break
+            
+    #         # If we didn't find it through source mapping, add it manually
+    #         if not main_func_found and len(trace.steps) > 50:
+    #             # Look for the main function execution after dispatcher
+    #             for i in range(20, min(200, len(trace.steps))):
+    #                 step = trace.steps[i]
+    #                 if step.op == "JUMPDEST" and i > 35:
+    #                     # This could be our main function
+    #                     source_line = None
+    #                     if self.ethdebug_info:
+    #                         context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
+    #                         if context and context['line'] > 8:
+    #                             source_line = context['line']
+    #                             # Decode parameters from calldata
+    #                             decoded_params = self.decode_function_parameters(main_selector, trace.input_data)
+                                
+    #                             # Insert at beginning (after dispatcher)
+    #                             main_call = FunctionCall(
+    #                                 name=main_function_name,
+    #                                 selector=main_selector,
+    #                                 entry_step=i,
+    #                                 exit_step=function_calls[0].entry_step - 1 if function_calls else len(trace.steps) - 1,
+    #                                 gas_used=trace.steps[i].gas - (trace.steps[function_calls[0].entry_step - 1].gas if function_calls else trace.steps[-1].gas),
+    #                                 depth=0,
+    #                                 args=decoded_params,
+    #                                 source_line=source_line,
+    #                                 call_type="external"  # Main entry from transaction
+    #                             )
+    #                             function_calls.insert(0, main_call)
+    #                             # Adjust depth of subsequent calls
+    #                             for call in function_calls[1:]:
+    #                                 call.depth += 1
+    #                             break
+        
+    #     # Always add the contract entry point first
+    #     if len(trace.steps) > 0:
+    #         # Determine if this is contract creation or runtime
+    #         # In multi-contract mode, use the actual target contract
+    #         if self.multi_contract_parser and trace.to_addr:
+    #             target_contract = self.multi_contract_parser.get_contract_at_address(trace.to_addr)
+    #             if target_contract:
+    #                 contract_name = target_contract.name
+    #                 is_create = target_contract.ethdebug_info.environment == 'create'
+    #             else:
+    #                 contract_name = 'Contract'
+    #                 is_create = False
+    #         else:
+    #             contract_name = self.ethdebug_info.contract_name if self.ethdebug_info else 'Contract'
+    #             is_create = self.ethdebug_info and self.ethdebug_info.environment == 'create'
+            
+    #         if is_create:
+    #             entry_name = f"{contract_name}::constructor"
+    #         else:
+    #             entry_name = f"{contract_name}::runtime_dispatcher"
+            
+    #         # Get source location for contract definition
+    #         source_line = None
+    #         if self.multi_contract_parser and trace.to_addr:
+    #             # Multi-contract mode: get source from the target contract
+    #             contract_info = self.multi_contract_parser.get_contract_at_address(trace.to_addr)
+    #             if contract_info:
+    #                 for step in trace.steps[:10]:
+    #                     context = contract_info.parser.get_source_context(step.pc, context_lines=0)
+    #                     if context and 'contract' in context.get('content', ''):
+    #                         source_line = context['line']
+    #                         break
+    #         elif self.ethdebug_info:
+    #             # Single contract mode
+    #             for step in trace.steps[:10]:
+    #                 context = self.ethdebug_parser.get_source_context(step.pc, context_lines=0)
+    #                 if context and 'contract' in context.get('content', ''):
+    #                     source_line = context['line']
+    #                     break
+            
+    #         # Add contract entry point
+    #         entry_call = FunctionCall(
+    #             name=entry_name,
+    #             selector="",
+    #             entry_step=0,
+    #             exit_step=function_calls[0].entry_step - 1 if function_calls else len(trace.steps) - 1,
+    #             gas_used=trace.steps[0].gas - (trace.steps[function_calls[0].entry_step - 1].gas if function_calls else trace.steps[-1].gas),
+    #             depth=0,
+    #             args=[],
+    #             source_line=source_line,
+    #             call_type="entry"  # Contract entry point (dispatcher/constructor)
+    #         )
+    #         function_calls.insert(0, entry_call)
+            
+    #         # Adjust depth of all other calls
+    #         for call in function_calls[1:]:
+    #             call.depth += 1
+        
+    #     # Clean up execution context for entry contract in multi-contract mode
+    #     if self.multi_contract_parser and trace.to_addr:
+    #         # Pop the entry contract's context from the execution stack
+    #         self.multi_contract_parser.pop_context()
+        
+    #     return function_calls
     
     def print_function_trace(self, trace: TransactionTrace, function_calls: List[FunctionCall]):
         """Print pretty function call trace with multi-contract support."""
@@ -1554,7 +1921,6 @@ class TransactionTracer:
         if self.multi_contract_parser:
             loaded_contracts = self.multi_contract_parser.get_all_loaded_contracts()
             if loaded_contracts:
-                print(f"{dim('Loaded contracts:')}")
                 for addr, name in loaded_contracts:
                     addr_display = self.format_address_display(addr, short=False)
                     print(f"  {info(addr_display)}")
@@ -1591,14 +1957,11 @@ class TransactionTracer:
                 if call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
                     # For external calls, show the target contract name if available
                     target_info = ""
-                    if self.multi_contract_parser and call.args:
+                    if self.multi_contract_parser and call.contract_address:
                         # Extract target address from args
-                        for arg_name, arg_value in call.args:
-                            if arg_name == "to":
-                                target_contract = self.multi_contract_parser.get_contract_at_address(str(arg_value))
-                                if target_contract:
-                                    target_info = f" → {target_contract.name}"
-                                break
+                        target_contract = self.multi_contract_parser.get_contract_at_address(call.contract_address)
+                        if target_contract:
+                            target_info = f" → {target_contract.name}"
                     call_type_display = success(f"[{call.call_type}]{target_info}")
                 elif call.call_type == "external":
                     call_type_display = success("[external]")
@@ -1621,16 +1984,10 @@ class TransactionTracer:
                         if step:
                             # Determine contract address for multi-contract mode
                             address = None
-                            if self.multi_contract_parser:
-                                # For external calls, use the target address
-                                if call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"] and call.args:
-                                    for arg_name, arg_value in call.args:
-                                        if arg_name == "to":
-                                            address = str(arg_value)
-                                            break
-                                else:
-                                    address = self.get_current_contract_address(trace, call.entry_step)
-                            
+                            if call.contract_address:
+                                address = call.contract_address
+                            else:
+                                address = self.get_current_contract_address(trace, call.entry_step)
                             context = self.get_source_context_for_step(step, address, context_lines=0)
                             if context:
                                 source_info = dim(f" @ {os.path.basename(context['file'])}:{context['line']}")
