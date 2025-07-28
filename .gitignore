@@ -6,3 +6,4 @@ walnut.config.yaml
 walnut.config.local
 __pycache__/
 *.txt
+src/walnut_cli.egg-info/PKG-INFO

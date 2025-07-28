@@ -119,7 +119,7 @@ class ETHDebugParser:
         self.debug_info: Optional[ETHDebugInfo] = None
         self.source_cache: Dict[str, List[str]] = {}
     
-    def load_ethdebug_files(self, debug_dir: Union[str, Path]) -> ETHDebugInfo:
+    def load_ethdebug_files(self, debug_dir: Union[str, Path], contract_name: Optional[str] = None) -> ETHDebugInfo:
         """Load ethdebug files from a directory."""
         debug_dir = Path(debug_dir)
         
@@ -136,24 +136,43 @@ class ETHDebugParser:
         for source in compilation_data['compilation']['sources']:
             sources[source['id']] = source['path']
         
-        # Find contract debug files
-        ethdebug_files = list(debug_dir.glob("*_ethdebug.json"))
-        runtime_files = list(debug_dir.glob("*_ethdebug-runtime.json"))
-        
-        if not ethdebug_files and not runtime_files:
-            raise FileNotFoundError(f"No ethdebug contract files found in {debug_dir}")
-        
-        # For now, load the first runtime file (we can extend this later)
-        if runtime_files:
-            debug_file = runtime_files[0]
-            environment = 'runtime'
+        debug_file = None
+        environment = None
+
+        if contract_name:
+            runtime_file = debug_dir / f"{contract_name}_ethdebug-runtime.json"
+            create_file = debug_dir / f"{contract_name}_ethdebug.json"
+            if runtime_file.exists():
+                debug_file = runtime_file
+                environment = 'runtime'
+            elif create_file.exists():
+                debug_file = create_file
+                environment = 'create'
+            else:
+                raise FileNotFoundError(f"No ethdebug file found for contract {contract_name} in {debug_dir}")
         else:
-            debug_file = ethdebug_files[0]
-            environment = 'create'
-        
-        # Extract contract name from filename
-        contract_name = debug_file.stem.replace('_ethdebug-runtime', '').replace('_ethdebug', '')
-        
+            ethdebug_files = list(debug_dir.glob("*_ethdebug.json"))
+            runtime_files = list(debug_dir.glob("*_ethdebug-runtime.json"))
+            
+            # Use first source path from sources as path
+            if sources:
+                first_source_path = next(iter(sources.values()))
+                contract_name_guess = os.path.splitext(os.path.basename(first_source_path))[0]
+                runtime_file = debug_dir / f"{contract_name_guess}_ethdebug-runtime.json"
+                create_file = debug_dir / f"{contract_name_guess}_ethdebug.json"
+                if runtime_file.exists():
+                    debug_file = runtime_file
+                    environment = 'runtime'
+                elif create_file.exists():
+                    debug_file = create_file
+                    environment = 'create'
+                else:
+                    raise FileNotFoundError(f"No ethdebug file found for contract {contract_name_guess} in {debug_dir} (tried {runtime_file.name} i {create_file.name})")
+            
+
+        # Extract contract name from filename (for info only)
+        contract_name_from_file = debug_file.stem.replace('_ethdebug-runtime', '').replace('_ethdebug', '')
+
         # Load contract debug info
         with open(debug_file) as f:
             contract_data = json.load(f)
@@ -173,7 +192,7 @@ class ETHDebugParser:
         
         self.debug_info = ETHDebugInfo(
             compilation=compilation_data['compilation'],
-            contract_name=contract_name,
+            contract_name=contract_name_from_file,
             environment=environment,
             instructions=instructions,
             sources=sources,
@@ -275,7 +294,7 @@ class ETHDebugParser:
                     current_dir = parent
                 
                 if not found:
-                    print(f"Warning: Source file not found: {source_path}")
+                    #print(f"Warning: Source file not found: {source_path}")
                     self.source_cache[source_path] = []
         
         return self.source_cache[source_path]

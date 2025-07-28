@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .ethdebug_parser import ETHDebugParser, ETHDebugInfo, SourceLocation, Instruction, VariableLocation
+from eth_utils import to_checksum_address
 
 
 @dataclass
@@ -64,9 +65,9 @@ class MultiContractETHDebugParser:
             ContractDebugInfo object containing the loaded debug information
         """
         # Normalize address
-        address = address.lower()
         if not address.startswith('0x'):
             address = '0x' + address
+        address = to_checksum_address(address)
         
         debug_dir = Path(debug_dir)
         if not debug_dir.exists():
@@ -77,8 +78,8 @@ class MultiContractETHDebugParser:
         parser.source_cache = self.source_cache  # Share source cache
         
         # Load ETHDebug info
-        ethdebug_info = parser.load_ethdebug_files(debug_dir)
-        
+        ethdebug_info = parser.load_ethdebug_files(debug_dir, contract_name)
+
         # Use provided name or extract from ETHDebug info
         if not contract_name:
             contract_name = ethdebug_info.contract_name
@@ -96,11 +97,11 @@ class MultiContractETHDebugParser:
         self.contracts[address] = contract_info
         self.contract_names[address] = contract_name
         
-        print(f"Loaded debug info for {contract_name} at {address}")
-        
         return contract_info
     
     def load_from_deployment(self, deployment_file: Union[str, Path]) -> Dict[str, ContractDebugInfo]:
+        # NOTE: This does not make sense because the contract that we want to debug is probably already deployed
+        # and we do not have deployment.json for it.
         """
         Load contract debug information from a deployment.json file.
         
@@ -215,9 +216,7 @@ class MultiContractETHDebugParser:
     
     def get_contract_at_address(self, address: str) -> Optional[ContractDebugInfo]:
         """Get contract debug info for a given address."""
-        address = address.lower()
-        if not address.startswith('0x'):
-            address = '0x' + address
+        address = to_checksum_address(address)
         return self.contracts.get(address)
     
     def push_context(self, address: str, call_type: str = "CALL", pc_offset: int = 0):

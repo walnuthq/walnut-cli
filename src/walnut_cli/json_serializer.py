@@ -4,7 +4,7 @@ JSON Serialization for Walnut CLI trace output
 Provides serialization of trace data into TypeScript-compatible JSON format
 for web app consumption.
 """
-
+import os
 import json
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import asdict
@@ -14,6 +14,7 @@ from hexbytes import HexBytes
 from .transaction_tracer import TransactionTrace, FunctionCall, TraceStep
 from .ethdebug_parser import ETHDebugInfo, ETHDebugParser
 from .multi_contract_ethdebug_parser import MultiContractETHDebugParser
+from eth_utils import to_checksum_address
 
 
 class TraceSerializer:
@@ -136,7 +137,7 @@ class TraceSerializer:
     
     def encode_function_input(self, call: FunctionCall, trace: TransactionTrace) -> str:
         """Encode function input data from selector and arguments."""
-        if call.depth == 0 and trace.input_data:
+        if call.depth == 1 and trace.input_data:
             # For the root call, use the transaction input data
             input_data = trace.input_data
             if isinstance(input_data, bytes):
@@ -195,19 +196,16 @@ class TraceSerializer:
         all_calls: List[FunctionCall]
     ) -> Dict[str, Any]:
         """Convert a FunctionCall to TraceCall format."""
+        trace_type = call.call_type.upper() if call.call_type else "INTERNALCALL"
         # Determine call type
-        if call.call_type == "external":
+        if trace_type == "EXTERNAL":
             trace_type = "CALL"
-        elif call.call_type == "internal":
+        elif trace_type == "INTERNAL":
             trace_type = "INTERNALCALL"
-        elif call.call_type == "delegatecall":
-            trace_type = "DELEGATECALL"
-        elif call.call_type == "staticcall":
-            trace_type = "STATICCALL"
-        else:
-            trace_type = "CALL"  # Default
-        
-        # Build input data with proper encoding
+        elif trace_type == "STATICCALL":
+            trace_type = "CALL"
+
+         # Build input data with proper encoding
         input_data = self.encode_function_input(call, trace)
         
         # For internal functions without selectors, generate them
@@ -229,74 +227,87 @@ class TraceSerializer:
                 gas = None
         
         gas_used = call.gas_used if call.gas_used else None
-        
-        # Build the trace call object
         trace_call = {
             "type": trace_type,
             "input": input_data,
+            "callId": call.call_id,
+            "parentCallId": call.parent_call_id,
+            "childrenCallIds": call.children_call_ids[:],
         }
+        if trace_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
+            if call.args:
+                for k, v in call.args:
+                    if k == "to":
+                        trace_call["to"] = v
+                        break
+            if "to" not in trace_call and hasattr(call, 'contract_address'):
+                trace_call["to"] = call.contract_address
+            trace_call["from"] = trace.from_addr if call.depth == 0 else (
+                call.contract_address if hasattr(call, 'contract_address') else None
+            )
+        elif trace_type == "INTERNALCALL":
+            if hasattr(call, 'contract_address'):
+                trace_call["contractAddress"] = call.contract_address
+        # Gas and gasUsed logic
+        if call.entry_step < len(trace.steps):
+            trace_call["gas"] = hex(trace.steps[call.entry_step].gas)
+        if call.gas_used is not None:
+            trace_call["gasUsed"] = hex(call.gas_used)
         
-        # Add optional fields
-        if trace_type != "INTERNALCALL":
-            trace_call["from"] = trace.from_addr
-            trace_call["to"] = trace.to_addr
-        
-        if gas is not None:
-            trace_call["gas"] = gas
-        
-        if gas_used is not None:
-            trace_call["gasUsed"] = gas_used
-        
-        # Extract logs that belong to this call based on step range
         call_logs = []
         for step_index, log in logs_with_steps:
             # Check if this log belongs to this function call
             if (step_index >= call.entry_step and 
                 (call.exit_step is None or step_index <= call.exit_step)):
-                # Also check that this log doesn't belong to a child call
-                belongs_to_child = False
-                for other_call in all_calls:
-                    if (other_call.depth == call.depth + 1 and
-                        step_index >= other_call.entry_step and
-                        (other_call.exit_step is None or step_index <= other_call.exit_step)):
-                        belongs_to_child = True
+                is_child_log = False
+                for child_id in call.children_call_ids:
+                    child = next((c for c in all_calls if c.call_id == child_id), None)
+                    if child and child.entry_step <= step_index <= (child.exit_step or step_index):
+                        is_child_log = True
                         break
-                
-                if not belongs_to_child:
+                if not is_child_log:
                     call_logs.append(log)
-        
         if call_logs:
             trace_call["logs"] = call_logs
-        
-        # Find child calls
+        # Recursively add children by call_id
         child_calls = []
-        for other_call in all_calls:
-            # A call is a child if:
-            # 1. Its depth is exactly one more than this call's depth
-            # 2. Its entry step is within this call's step range
-            # 3. It's not the same call
-            if (other_call != call and
-                other_call.depth == call.depth + 1 and 
-                call.entry_step < other_call.entry_step and
-                (call.exit_step is None or other_call.entry_step <= call.exit_step)):
-                # Pass the logs that belong to this time range
-                child_logs = [(i, log) for i, log in logs_with_steps 
-                             if other_call.entry_step <= i <= (other_call.exit_step or i)]
-                child_call = self.convert_function_call_to_trace_call(
-                    other_call, trace, child_logs, all_calls
-                )
-                child_calls.append(child_call)
-        
+        for child_id in call.children_call_ids:
+            child = next((c for c in all_calls if c.call_id == child_id), None)
+            if child:
+                child_calls.append(self.convert_function_call_to_trace_call(
+                    child, trace, logs_with_steps, all_calls
+                ))
         if child_calls:
             trace_call["calls"] = child_calls
+        for field in ["to", "from", "contractAddress", "input", "output"]:
+            if field in trace_call and isinstance(trace_call[field], str):
+                if not trace_call[field].startswith("0x"):
+                    trace_call[field] = "0x" + trace_call[field]
+                trace_call[field] = trace_call[field].lower()
         
-        # Add output only if there's a return value
-        if call.return_value:
-            trace_call["output"] = str(call.return_value)
-        elif trace_type != "INTERNALCALL":
-            # For external calls, always include output field per Ethereum standards
-            trace_call["output"] = trace.output if hasattr(trace, 'output') else "0x"
-        
+        # Ensure 'to' and 'from' are always present in trace_call
+        if "to" not in trace_call or not trace_call["to"]:
+            if hasattr(call, 'contract_address') and call.contract_address:
+                trace_call["to"] = call.contract_address
+        if "from" not in trace_call or not trace_call["from"]:
+            if call.depth == 0:
+                trace_call["from"] = trace.from_addr
+            elif hasattr(call, 'contract_address') and call.contract_address:
+                trace_call["from"] = call.contract_address
+
+        # Normalize addresses to checksum format for 'to', 'from', 'contractAddress'
+        for addr_field in ["to", "from", "contractAddress"]:
+            if addr_field in trace_call and trace_call[addr_field]:
+                try:
+                    # Only normalize if it looks like an address
+                    val = trace_call[addr_field]
+                    if isinstance(val, str) and val.startswith("0x") and len(val) == 42:
+                        trace_call[addr_field] = to_checksum_address(val)
+                except Exception:
+                    pass
+        # Add function name
+        trace_call["function_name"] = call.name
+
         return trace_call
     
     def extract_internal_function_abi(
@@ -315,9 +326,10 @@ class TraceSerializer:
                 # This is an external function from the loaded ABI
                 contract_addr = tracer_instance.to_addr if hasattr(tracer_instance, 'to_addr') else None
                 if contract_addr:
-                    if contract_addr not in abis_by_contract:
-                        abis_by_contract[contract_addr] = []
-                    abis_by_contract[contract_addr].append(abi_item)
+                    checksum_addr = to_checksum_address(contract_addr)
+                    if checksum_addr not in abis_by_contract:
+                        abis_by_contract[checksum_addr] = []
+                    abis_by_contract[checksum_addr].append(abi_item)
         
         # Extract internal functions from the function calls
         for call in function_calls:
@@ -325,12 +337,13 @@ class TraceSerializer:
                 # Determine which contract this internal function belongs to
                 # For now, assume it belongs to the main contract
                 contract_addr = tracer_instance.to_addr if tracer_instance and hasattr(tracer_instance, 'to_addr') else "0x0"
+                checksum_addr = to_checksum_address(contract_addr)
                 
-                if contract_addr not in internal_functions_by_contract:
-                    internal_functions_by_contract[contract_addr] = {}
+                if checksum_addr not in internal_functions_by_contract:
+                    internal_functions_by_contract[checksum_addr] = {}
                 
                 # Skip if we already have this function
-                if call.name in internal_functions_by_contract[contract_addr]:
+                if call.name in internal_functions_by_contract[checksum_addr]:
                     continue
                 
                 # Build ABI entry for internal function
@@ -356,17 +369,17 @@ class TraceSerializer:
                     "type": "function"
                 }
                 
-                internal_functions_by_contract[contract_addr][call.name] = internal_abi
+                internal_functions_by_contract[checksum_addr][call.name] = internal_abi
         
         # Merge internal functions into the contract ABIs
-        for contract_addr, internal_funcs in internal_functions_by_contract.items():
-            if contract_addr not in abis_by_contract:
-                abis_by_contract[contract_addr] = []
+        for checksum_addr, internal_funcs in internal_functions_by_contract.items():
+            if checksum_addr not in abis_by_contract:
+                abis_by_contract[checksum_addr] = []
             # Check for duplicates before adding
-            existing_names = {func.get('name') for func in abis_by_contract[contract_addr]}
+            existing_names = {func.get('name') for func in abis_by_contract[checksum_addr]}
             for func_name, func_abi in internal_funcs.items():
                 if func_name not in existing_names:
-                    abis_by_contract[contract_addr].append(func_abi)
+                    abis_by_contract[checksum_addr].append(func_abi)
         
         return abis_by_contract
     
@@ -464,11 +477,20 @@ class TraceSerializer:
         if multi_parser:
             # Multi-contract mode
             for address, contract_info in multi_parser.contracts.items():
+                abi = []
+                abi_path = contract_info.debug_dir / f"{contract_info.name}.abi"
+                if os.path.exists(abi_path):
+                    with open(abi_path) as f:
+                        try:
+                            abi = json.load(f)
+                        except Exception:
+                            abi = []
+                checksum_addr = to_checksum_address(address)
                 contract_data = self._build_single_contract_data(
                     address,
                     contract_info.parser,
                     contract_info.ethdebug_info,
-                    abis.get(address, [])
+                    abi
                 )
                 if contract_data:
                     contracts[address] = contract_data
@@ -476,11 +498,12 @@ class TraceSerializer:
             # Single contract mode
             address = trace.to_addr
             if address:
+                checksum_addr = to_checksum_address(address)
                 contract_data = self._build_single_contract_data(
                     address,
                     tracer_instance.ethdebug_parser,
                     ethdebug_info,
-                    abis.get(address, [])
+                    abis.get(checksum_addr, [])
                 )
                 if contract_data:
                     contracts[address] = contract_data
@@ -534,57 +557,40 @@ class TraceSerializer:
         """Serialize trace data to JSON format for web app."""
         # Extract logs from trace with their step indices
         logs_with_steps = self.extract_logs_from_trace(trace)
-        
-        # Find the root call (entry point)
-        # Look for the main external function call (depth 1, since depth 0 is the dispatcher)
-        root_calls = [call for call in function_calls if call.depth == 1 and call.call_type == "external"]
-        
+
+        # Always use the dispatcher (depth 0, call_type 'entry') as the root call
+        root_calls = [call for call in function_calls if call.depth == 0 and call.call_type == "entry"]
         if not root_calls:
-            # Fallback to depth 0 if no external call found
-            root_calls = [call for call in function_calls if call.depth == 0]
-        
-        if not root_calls:
-            # Create a default root call if none exists
-            # Extract just the log data for the default case
-            logs_only = [log for _, log in logs_with_steps]
-            root_trace_call = {
-                "type": "CALL",
-                "from": trace.from_addr,
-                "to": trace.to_addr,
-                "gas": trace.steps[0].gas if trace.steps else 0,
-                "gasUsed": trace.gas_used,
-                "input": trace.input_data,
-                "output": trace.output or "0x",
-                "logs": logs_only
-            }
+            # Fallback: if no dispatcher, use the first call
+            root_calls = function_calls[:1]
+
+        # Convert the root call and build the call tree recursively
+        root_trace_call = self.convert_function_call_to_trace_call(
+            root_calls[0], trace, logs_with_steps, function_calls
+        )
+        # Ensure root call has proper from/to addresses and gas info
+        root_trace_call["from"] = trace.from_addr
+        root_trace_call["to"] = trace.to_addr
+        root_trace_call["gas"] = trace.steps[0].gas if trace.steps else 0
+        root_trace_call["gasUsed"] = trace.gas_used
+        # Handle input data - for root call, always use the full transaction input data
+        if isinstance(trace.input_data, bytes):
+            root_trace_call["input"] = '0x' + trace.input_data.hex()
+        elif hasattr(trace.input_data, 'hex'):
+            root_trace_call["input"] = trace.input_data.hex()
         else:
-            # Convert the root call
-            root_trace_call = self.convert_function_call_to_trace_call(
-                root_calls[0], trace, logs_with_steps, function_calls
-            )
-            # Ensure root call has proper from/to addresses
-            root_trace_call["from"] = trace.from_addr
-            root_trace_call["to"] = trace.to_addr
-            root_trace_call["gas"] = trace.steps[0].gas if trace.steps else 0
-            root_trace_call["gasUsed"] = trace.gas_used
-            # Handle input data - for root call, always use the full transaction input data
-            if isinstance(trace.input_data, bytes):
-                root_trace_call["input"] = '0x' + trace.input_data.hex()
-            elif isinstance(trace.input_data, HexBytes):
-                root_trace_call["input"] = trace.input_data.hex()
-            else:
-                root_trace_call["input"] = trace.input_data
-            # Handle output
-            if isinstance(trace.output, bytes):
-                root_trace_call["output"] = '0x' + trace.output.hex()
-            elif isinstance(trace.output, HexBytes):
-                root_trace_call["output"] = trace.output.hex()
-            else:
-                root_trace_call["output"] = trace.output or "0x"
-        
+            root_trace_call["input"] = trace.input_data
+        # Handle output
+        if isinstance(trace.output, bytes):
+            root_trace_call["output"] = '0x' + trace.output.hex()
+        elif hasattr(trace.output, 'hex'):
+            root_trace_call["output"] = trace.output.hex()
+        else:
+            root_trace_call["output"] = trace.output or "0x"
+
         # Build ABIs mapping
         abis = self.extract_internal_function_abi(function_calls, tracer_instance)
-        
+
         # Build the response - check if we have step-by-step debugging info
         if trace.steps and (ethdebug_info or multi_parser):
             # Build step-by-step debugging response
@@ -592,7 +598,6 @@ class TraceSerializer:
             contracts = self.build_contracts_mapping(
                 trace, ethdebug_info, multi_parser, abis, tracer_instance
             )
-            
             response = {
                 "traceCall": root_trace_call,
                 "steps": steps,
