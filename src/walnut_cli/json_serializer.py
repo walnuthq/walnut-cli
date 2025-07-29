@@ -60,35 +60,57 @@ class TraceSerializer:
                     try:
                         offset = int(step.stack[0], 16) if isinstance(step.stack[0], str) else int(step.stack[0])
                         size = int(step.stack[1], 16) if isinstance(step.stack[1], str) else int(step.stack[1])
-                    except:
+                        
+                        # Validate and sanitize values
+                        if offset < 0:
+                            offset = 0
+                        if size < 0:
+                            size = 0
+                        # Limit offset to prevent integer overflow
+                        max_offset = 1024 * 1024 * 1024  # 1GB limit
+                        if offset > max_offset:
+                            offset = max_offset
+                    except (ValueError, TypeError, OverflowError):
                         offset = 0
                         size = 0
                     
                     # Extract data from memory
                     data = "0x"
                     if size > 0:
+                        # Limit size to prevent memory overflow (max 1MB)
+                        max_size = 1024 * 1024  # 1MB limit
+                        safe_size = min(size, max_size)
+                        
                         if step.memory:
                             try:
                                 # Memory is stored as hex string
+                                # Check for integer overflow in calculations
+                                if offset > (2**63 - 1) // 2:  # Prevent overflow in offset * 2
+                                    offset = (2**63 - 1) // 2
                                 start = offset * 2  # Each byte is 2 hex chars
-                                end = start + (size * 2)
+                                end = start + (safe_size * 2)
                                 # Ensure we don't go out of bounds
                                 if end <= len(step.memory):
                                     memory_data = step.memory[start:end]
                                     # Ensure we only take the exact size requested
-                                    if len(memory_data) > size * 2:
-                                        memory_data = memory_data[:size * 2]
+                                    if len(memory_data) > safe_size * 2:
+                                        memory_data = memory_data[:safe_size * 2]
                                     data = "0x" + memory_data
                                 else:
                                     # Use whatever memory is available up to size
-                                    memory_data = step.memory[start:start + (size * 2)]
-                                    data = "0x" + memory_data
+                                    available_size = min(safe_size, (len(step.memory) - start) // 2)
+                                    if available_size > 0:
+                                        memory_data = step.memory[start:start + (available_size * 2)]
+                                        data = "0x" + memory_data
+                                    else:
+                                        # No memory available, use zeros
+                                        data = "0x" + "00" * safe_size
                             except:
                                 # If memory extraction fails, use zeros
-                                data = "0x" + "00" * size
+                                data = "0x" + "00" * safe_size
                         else:
                             # No memory available, use zeros
-                            data = "0x" + "00" * size
+                            data = "0x" + "00" * safe_size
                     
                     # Extract topics from stack
                     # Stack layout for LOGn: [offset, size, topic1, topic2, ..., topicN]
@@ -99,7 +121,16 @@ class TraceSerializer:
                             # Convert to proper hex format
                             if isinstance(topic, int):
                                 # Convert integer to 32-byte hex
-                                topic = '0x' + hex(topic)[2:].zfill(64)
+                                try:
+                                    # Limit extremely large integers to prevent overflow
+                                    max_int = 2**256 - 1  # Max uint256
+                                    safe_topic = min(topic, max_int)
+                                    if safe_topic < 0:
+                                        safe_topic = 0
+                                    topic = '0x' + hex(safe_topic)[2:].zfill(64)
+                                except (OverflowError, ValueError):
+                                    # Fallback to zero if conversion fails
+                                    topic = '0x' + '0' * 64
                             elif isinstance(topic, str):
                                 # Remove 0x prefix if present
                                 topic = topic[2:] if topic.startswith('0x') else topic
@@ -168,8 +199,17 @@ class TraceSerializer:
             for param_name, param_value in call.args:
                 if isinstance(param_value, int):
                     # Encode as 32-byte hex value
-                    hex_value = hex(param_value)[2:].zfill(64)
-                    input_data += hex_value
+                    try:
+                        # Limit extremely large integers to prevent overflow
+                        max_int = 2**256 - 1  # Max uint256
+                        safe_value = min(param_value, max_int)
+                        if safe_value < 0:
+                            safe_value = 0
+                        hex_value = hex(safe_value)[2:].zfill(64)
+                        input_data += hex_value
+                    except (OverflowError, ValueError):
+                        # Fallback to zero if conversion fails
+                        input_data += "0" * 64
                 elif isinstance(param_value, str) and param_value.startswith('0x'):
                     # Already hex, just append (removing 0x prefix)
                     input_data += param_value[2:].zfill(64)
