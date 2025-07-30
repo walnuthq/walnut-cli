@@ -122,6 +122,8 @@ class ETHDebugParser:
     def load_ethdebug_files(self, debug_dir: Union[str, Path], contract_name: Optional[str] = None) -> ETHDebugInfo:
         """Load ethdebug files from a directory."""
         debug_dir = Path(debug_dir)
+        # Store debug directory for source file resolution
+        self.debug_dir = debug_dir
         
         # Load compilation info
         compilation_file = debug_dir / "ethdebug.json"
@@ -260,38 +262,50 @@ class ETHDebugParser:
     def load_source_file(self, source_path: str) -> List[str]:
         """Load and cache source file lines."""
         if source_path not in self.source_cache:
+            found = False
+            
             # Try to find the source file
             if os.path.exists(source_path):
                 with open(source_path) as f:
                     self.source_cache[source_path] = f.readlines()
+                found = True
             else:
-                # Try walking up parent directories to find the file
-                filename = os.path.basename(source_path)
-                current_dir = os.getcwd()
-                found = False
+                # If we have debug directory info, try relative to that first
+                if hasattr(self, 'debug_dir') and self.debug_dir:
+                    debug_relative_path = os.path.join(self.debug_dir, '..', source_path)
+                    debug_relative_path = os.path.normpath(debug_relative_path)
+                    if os.path.exists(debug_relative_path):
+                        with open(debug_relative_path) as f:
+                            self.source_cache[source_path] = f.readlines()
+                        found = True
                 
-                # Check current directory and up to 3 levels of parent directories
-                for _ in range(4):
-                    # Also check subdirectories at each level
-                    for root, dirs, files in os.walk(current_dir):
-                        if filename in files:
-                            full_path = os.path.join(root, filename)
-                            with open(full_path) as f:
-                                self.source_cache[source_path] = f.readlines()
-                            found = True
-                            break
-                        # Don't go too deep
-                        if root.count(os.sep) - current_dir.count(os.sep) > 2:
-                            break
+                if not found:
+                    # Try walking up parent directories to find the file
+                    filename = os.path.basename(source_path)
+                    current_dir = os.getcwd()
                     
-                    if found:
-                        break
-                    
-                    # Move up one directory
-                    parent = os.path.dirname(current_dir)
-                    if parent == current_dir:  # Reached root
-                        break
-                    current_dir = parent
+                    # Check current directory and up to 3 levels of parent directories
+                    for _ in range(4):
+                        # Also check subdirectories at each level
+                        for root, dirs, files in os.walk(current_dir):
+                            if filename in files:
+                                full_path = os.path.join(root, filename)
+                                with open(full_path) as f:
+                                    self.source_cache[source_path] = f.readlines()
+                                found = True
+                                break
+                            # Don't go too deep
+                            if root.count(os.sep) - current_dir.count(os.sep) > 2:
+                                break
+                        
+                        if found:
+                            break
+                        
+                        # Move up one directory
+                        parent = os.path.dirname(current_dir)
+                        if parent == current_dir:  # Reached root
+                            break
+                        current_dir = parent
                 
                 if not found:
                     #print(f"Warning: Source file not found: {source_path}")

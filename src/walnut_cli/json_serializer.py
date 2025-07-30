@@ -60,35 +60,57 @@ class TraceSerializer:
                     try:
                         offset = int(step.stack[0], 16) if isinstance(step.stack[0], str) else int(step.stack[0])
                         size = int(step.stack[1], 16) if isinstance(step.stack[1], str) else int(step.stack[1])
-                    except:
+                        
+                        # Validate and sanitize values
+                        if offset < 0:
+                            offset = 0
+                        if size < 0:
+                            size = 0
+                        # Limit offset to prevent integer overflow
+                        max_offset = 1024 * 1024 * 1024  # 1GB limit
+                        if offset > max_offset:
+                            offset = max_offset
+                    except (ValueError, TypeError, OverflowError):
                         offset = 0
                         size = 0
                     
                     # Extract data from memory
                     data = "0x"
                     if size > 0:
+                        # Limit size to prevent memory overflow (max 1MB)
+                        max_size = 1024 * 1024  # 1MB limit
+                        safe_size = min(size, max_size)
+                        
                         if step.memory:
                             try:
                                 # Memory is stored as hex string
+                                # Check for integer overflow in calculations
+                                if offset > (2**63 - 1) // 2:  # Prevent overflow in offset * 2
+                                    offset = (2**63 - 1) // 2
                                 start = offset * 2  # Each byte is 2 hex chars
-                                end = start + (size * 2)
+                                end = start + (safe_size * 2)
                                 # Ensure we don't go out of bounds
                                 if end <= len(step.memory):
                                     memory_data = step.memory[start:end]
                                     # Ensure we only take the exact size requested
-                                    if len(memory_data) > size * 2:
-                                        memory_data = memory_data[:size * 2]
+                                    if len(memory_data) > safe_size * 2:
+                                        memory_data = memory_data[:safe_size * 2]
                                     data = "0x" + memory_data
                                 else:
                                     # Use whatever memory is available up to size
-                                    memory_data = step.memory[start:start + (size * 2)]
-                                    data = "0x" + memory_data
+                                    available_size = min(safe_size, (len(step.memory) - start) // 2)
+                                    if available_size > 0:
+                                        memory_data = step.memory[start:start + (available_size * 2)]
+                                        data = "0x" + memory_data
+                                    else:
+                                        # No memory available, use zeros
+                                        data = "0x" + "00" * safe_size
                             except:
                                 # If memory extraction fails, use zeros
-                                data = "0x" + "00" * size
+                                data = "0x" + "00" * safe_size
                         else:
                             # No memory available, use zeros
-                            data = "0x" + "00" * size
+                            data = "0x" + "00" * safe_size
                     
                     # Extract topics from stack
                     # Stack layout for LOGn: [offset, size, topic1, topic2, ..., topicN]
@@ -99,7 +121,16 @@ class TraceSerializer:
                             # Convert to proper hex format
                             if isinstance(topic, int):
                                 # Convert integer to 32-byte hex
-                                topic = '0x' + hex(topic)[2:].zfill(64)
+                                try:
+                                    # Limit extremely large integers to prevent overflow
+                                    max_int = 2**256 - 1  # Max uint256
+                                    safe_topic = min(topic, max_int)
+                                    if safe_topic < 0:
+                                        safe_topic = 0
+                                    topic = '0x' + hex(safe_topic)[2:].zfill(64)
+                                except (OverflowError, ValueError):
+                                    # Fallback to zero if conversion fails
+                                    topic = '0x' + '0' * 64
                             elif isinstance(topic, str):
                                 # Remove 0x prefix if present
                                 topic = topic[2:] if topic.startswith('0x') else topic
@@ -168,8 +199,17 @@ class TraceSerializer:
             for param_name, param_value in call.args:
                 if isinstance(param_value, int):
                     # Encode as 32-byte hex value
-                    hex_value = hex(param_value)[2:].zfill(64)
-                    input_data += hex_value
+                    try:
+                        # Limit extremely large integers to prevent overflow
+                        max_int = 2**256 - 1  # Max uint256
+                        safe_value = min(param_value, max_int)
+                        if safe_value < 0:
+                            safe_value = 0
+                        hex_value = hex(safe_value)[2:].zfill(64)
+                        input_data += hex_value
+                    except (OverflowError, ValueError):
+                        # Fallback to zero if conversion fails
+                        input_data += "0" * 64
                 elif isinstance(param_value, str) and param_value.startswith('0x'):
                     # Already hex, just append (removing 0x prefix)
                     input_data += param_value[2:].zfill(64)
@@ -193,7 +233,9 @@ class TraceSerializer:
         call: FunctionCall, 
         trace: TransactionTrace,
         logs_with_steps: List[Tuple[int, Dict[str, Any]]],
-        all_calls: List[FunctionCall]
+        all_calls: List[FunctionCall],
+        multi_parser: Optional[MultiContractETHDebugParser] = None,
+        tracer_instance = None
     ) -> Dict[str, Any]:
         """Convert a FunctionCall to TraceCall format."""
         trace_type = call.call_type.upper() if call.call_type else "INTERNALCALL"
@@ -234,6 +276,68 @@ class TraceSerializer:
             "parentCallId": call.parent_call_id,
             "childrenCallIds": call.children_call_ids[:],
         }
+        
+        # Add decoded function information
+        trace_call["functionName"] = call.name
+        
+        # Extract and format input parameters
+        if call.args:
+            argument_types = []
+            argument_names = []
+            argument_values = []
+            
+            # Try to get ABI information for proper types
+            abi_item = None
+            if tracer_instance and hasattr(tracer_instance, 'function_abis') and call.selector:
+                abi_item = tracer_instance.function_abis.get(call.selector)
+            
+            for i, (param_name, param_value) in enumerate(call.args):
+                # Get type from ABI if available
+                if abi_item and 'inputs' in abi_item and i < len(abi_item['inputs']):
+                    param_info = abi_item['inputs'][i]
+                    param_type = param_info.get('type', 'uint256')
+                    
+                    # If it's a tuple (struct), expand the type to show components
+                    if param_type == 'tuple' and 'components' in param_info:
+                        # Build a detailed type string showing struct fields
+                        field_types = []
+                        for comp in param_info['components']:
+                            field_name = comp.get('name', 'field')
+                            field_type = comp.get('type', 'unknown')
+                            field_types.append(f"{field_name}:{field_type}")
+                        param_type = f"tuple({', '.join(field_types)})"
+                else:
+                    # Infer type from value
+                    if isinstance(param_value, str) and param_value.startswith('0x') and len(param_value) == 42:
+                        param_type = "address"
+                    elif isinstance(param_value, str) and param_value not in ['<unknown>', 'None']:
+                        param_type = "string"
+                    else:
+                        param_type = "uint256"
+                
+                argument_types.append(param_type)
+                argument_names.append(param_name)
+                argument_values.append(param_value)
+            
+            trace_call["inputs"] = {
+                "argumentsType": argument_types,
+                "argumentsName": argument_names,
+                "argumentsDecodedValue": argument_values
+            }
+        else:
+            # No arguments
+            trace_call["inputs"] = {
+                "argumentsType": [],
+                "argumentsName": [],
+                "argumentsDecodedValue": []
+            }
+        
+        # TODO: Add outputs data when available
+        trace_call["outputs"] = {
+            "argumentsType": [],
+            "argumentsName": [],
+            "argumentsDecodedValue": []
+        }
         if trace_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
             if call.args:
                 for k, v in call.args:
@@ -245,6 +349,13 @@ class TraceSerializer:
             trace_call["from"] = trace.from_addr if call.depth == 0 else (
                 call.contract_address if hasattr(call, 'contract_address') else None
             )
+            
+            # Add isVerified field for external calls
+            if multi_parser and call.contract_address:
+                target_contract = multi_parser.get_contract_at_address(call.contract_address)
+                trace_call["isVerified"] = target_contract is not None
+            else:
+                trace_call["isVerified"] = False
         elif trace_type == "INTERNALCALL":
             if hasattr(call, 'contract_address'):
                 trace_call["contractAddress"] = call.contract_address
@@ -275,7 +386,7 @@ class TraceSerializer:
             child = next((c for c in all_calls if c.call_id == child_id), None)
             if child:
                 child_calls.append(self.convert_function_call_to_trace_call(
-                    child, trace, logs_with_steps, all_calls
+                    child, trace, logs_with_steps, all_calls, multi_parser, tracer_instance
                 ))
         if child_calls:
             trace_call["calls"] = child_calls
@@ -307,6 +418,10 @@ class TraceSerializer:
                     pass
         # Add function name
         trace_call["function_name"] = call.name
+        
+        # Add isRevertedFrame if this frame caused the revert
+        if hasattr(call, 'caused_revert') and call.caused_revert:
+            trace_call["isRevertedFrame"] = True
 
         return trace_call
     
@@ -566,7 +681,7 @@ class TraceSerializer:
 
         # Convert the root call and build the call tree recursively
         root_trace_call = self.convert_function_call_to_trace_call(
-            root_calls[0], trace, logs_with_steps, function_calls
+            root_calls[0], trace, logs_with_steps, function_calls, multi_parser, tracer_instance
         )
         # Ensure root call has proper from/to addresses and gas info
         root_trace_call["from"] = trace.from_addr
@@ -599,6 +714,7 @@ class TraceSerializer:
                 trace, ethdebug_info, multi_parser, abis, tracer_instance
             )
             response = {
+                "status": "success" if trace.success else "reverted",
                 "traceCall": root_trace_call,
                 "steps": steps,
                 "contracts": contracts
@@ -606,9 +722,14 @@ class TraceSerializer:
         else:
             # Basic response without step-by-step debugging
             response = {
+                "status": "success" if trace.success else "reverted",
                 "traceCall": root_trace_call,
                 "abis": abis
             }
+        
+        # Add error message if transaction reverted
+        if not trace.success and trace.error:
+            response["error"] = trace.error
         
         # Convert any non-serializable objects
         return self._convert_to_serializable(response)

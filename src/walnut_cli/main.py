@@ -130,6 +130,12 @@ def trace_command(args):
                 abi_path = primary_contract.debug_dir / f"{primary_contract.name}.abi"
                 if abi_path.exists():
                     tracer.load_abi(str(abi_path))
+                
+                # Load ABIs for all contracts in multi-contract mode
+                for addr, contract_info in multi_parser.contracts.items():
+                    abi_path = contract_info.debug_dir / f"{contract_info.name}.abi"
+                    if abi_path.exists():
+                        tracer.load_abi(str(abi_path))
     
     elif args.ethdebug_dir and len(args.ethdebug_dir) == 1:
         # Single contract mode (backward compatibility)

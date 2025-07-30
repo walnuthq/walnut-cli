@@ -36,6 +36,7 @@ class FunctionCall:
     contract_address: Optional[str] = None
     parent_entry_step: Optional[int] = None
     call_id: int = 0
+    caused_revert: bool = False  # True if this frame initiated the revert
     parent_call_id: Optional[int] = None
     children_call_ids: List[int] = field(default_factory=list)
 
@@ -115,6 +116,7 @@ class TransactionTracer:
         self.function_signatures = {}  # selector -> function name
         self.function_abis = {}  # selector -> full ABI item
         self.function_params = {}  # function name -> parameter info
+        self.function_abis_by_name = {}  # function name -> full ABI item
     
     def _log(self, message: str, level: str = "info"):
         """Log a message to stderr if not in quiet mode."""
@@ -396,6 +398,27 @@ class TransactionTracer:
             )
             steps.append(trace_step)
         
+        # Extract error message for reverted transactions
+        error_msg = trace_result.get('error')
+        if not error_msg and receipt['status'] == 0:
+            # Try to decode revert reason from return value
+            return_value = trace_result.get('returnValue', '')
+            if return_value and return_value.startswith('08c379a0'):
+                # This is Error(string) - decode the revert reason
+                try:
+                    data = return_value[8:]  # Skip selector
+                    offset = int(data[:64], 16)
+                    length = int(data[64:128], 16)
+                    string_hex = data[128:128+length*2]
+                    error_msg = bytes.fromhex(string_hex).decode('utf-8')
+                except:
+                    error_msg = "Unknown revert reason"
+            elif return_value:
+                # Other revert types (custom errors, etc.)
+                error_msg = f"Reverted with data: 0x{return_value}"
+            else:
+                error_msg = "Transaction reverted without reason"
+        
         return TransactionTrace(
             tx_hash=tx_hash,
             from_addr=tx['from'],
@@ -406,7 +429,7 @@ class TransactionTracer:
             output=trace_result.get('returnValue', '0x'),
             steps=steps,
             success=receipt['status'] == 1,
-            error=trace_result.get('error')
+            error=error_msg
         )
     
     def simulate_call_trace(self, to, from_, calldata, block, tx_index=None, value = 0):
@@ -454,6 +477,28 @@ class TransactionTracer:
             )
             steps.append(trace_step)
 
+        # Extract error message for failed calls
+        error_msg = trace_result.get('error')
+        is_failed = trace_result.get('failed', False)
+        if not error_msg and is_failed:
+            # Try to decode revert reason from return value
+            return_value = trace_result.get('returnValue', '')
+            if return_value and return_value.startswith('08c379a0'):
+                # This is Error(string) - decode the revert reason
+                try:
+                    data = return_value[8:]  # Skip selector
+                    offset = int(data[:64], 16)
+                    length = int(data[64:128], 16)
+                    string_hex = data[128:128+length*2]
+                    error_msg = bytes.fromhex(string_hex).decode('utf-8')
+                except:
+                    error_msg = "Unknown revert reason"
+            elif return_value:
+                # Other revert types (custom errors, etc.)
+                error_msg = f"Reverted with data: 0x{return_value}"
+            else:
+                error_msg = "Call failed without reason"
+        
         # Compose TransactionTrace (simulate, so tx_hash is None)
         return TransactionTrace(
             tx_hash=None,
@@ -464,8 +509,8 @@ class TransactionTracer:
             gas_used=trace_result.get('gas', 0),
             output=trace_result.get('returnValue', '0x'),
             steps=steps,
-            success=trace_result.get('failed', False) is False,
-            error=trace_result.get('error')
+            success=not is_failed,
+            error=error_msg
         )
 
     def _basic_trace(self, tx_hash: str) -> Dict[str, Any]:
@@ -626,6 +671,8 @@ class TransactionTracer:
                     self.function_abis[selector] = item
                     # Store parameter info by function name
                     self.function_params[name] = inputs
+                    # Also store ABI by function name for internal calls
+                    self.function_abis_by_name[name] = item
                     
         except Exception as e:
             print(f"Warning: Could not load ABI: {e}")
@@ -756,18 +803,18 @@ class TransactionTracer:
             comp_type = component['type']
             
             if comp_type == 'string':
-                parts.append(f"{name}={repr(val)}")
+                parts.append(f"{name}[{comp_type}]={repr(val)}")
             elif comp_type == 'address':
                 try:
                     formatted_addr = to_checksum_address(val)
-                    parts.append(f"{name}={formatted_addr}")
+                    parts.append(f"{name}[{comp_type}]={formatted_addr}")
                 except:
-                    parts.append(f"{name}={val}")
+                    parts.append(f"{name}[{comp_type}]={val}")
             elif comp_type == 'tuple' and component.get('components'):
                 nested_formatted = self.format_tuple_value(val, component['components'])
-                parts.append(f"{name}={nested_formatted}")
+                parts.append(f"{name}[{comp_type}]={nested_formatted}")
             else:
-                parts.append(f"{name}={val}")
+                parts.append(f"{name}[{comp_type}]={val}")
         
         return f"({', '.join(parts)})"
     
@@ -1169,6 +1216,7 @@ class TransactionTracer:
         current_contract = trace.to_addr
         current_depth = 0
         context_stack = []
+        revert_already_marked = False  # Track if we've already marked a revert frame
         
         # Track parent-child relationships properly
         active_parents = []  # Stack of active parent call IDs
@@ -1196,7 +1244,31 @@ class TransactionTracer:
 
         
         # Find the main function entry
+        prev_depth = 0
         for i, step in enumerate(trace.steps):
+            # Check for depth decrease (returning from external call)
+            if i > 0 and step.depth < prev_depth:
+                # We're returning from an external call
+                # Find the most recent external call on the stack
+                for j in range(len(call_stack) - 1, -1, -1):
+                    if call_stack[j].call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
+                        returned_call = call_stack[j]
+                        returned_call.exit_step = i - 1
+                        returned_call.gas_used = trace.steps[returned_call.entry_step].gas - trace.steps[i-1].gas
+                        call_stack.pop(j)
+                        # Restore context
+                        if context_stack:
+                            context = context_stack.pop()
+                            current_contract = context['contract']
+                            current_depth = context['depth']
+                            # Restore ETHDebug info
+                            if 'ethdebug_info' in context:
+                                self.ethdebug_info = context['ethdebug_info']
+                            if 'ethdebug_parser' in context:
+                                self.ethdebug_parser = context['ethdebug_parser']
+                        break
+            
+            prev_depth = step.depth
             # Handle cross-contract calls
             if step.op in ["CALL", "DELEGATECALL", "STATICCALL"]:
                 call = self._process_external_call(step, i, current_contract, current_depth)
@@ -1221,10 +1293,19 @@ class TransactionTracer:
                     context_stack.append({
                         'contract': current_contract,
                         'depth': current_depth,
-                        'return_pc': step.pc + 1
+                        'return_pc': step.pc + 1,
+                        'ethdebug_info': self.ethdebug_info,
+                        'ethdebug_parser': self.ethdebug_parser
                     })
                     current_contract = call.contract_address
                     current_depth += 1
+                    
+                    # Switch to the target contract's ETHDebug info if available
+                    if self.multi_contract_parser and call.contract_address:
+                        target_contract = self.multi_contract_parser.get_contract_at_address(call.contract_address)
+                        if target_contract:
+                            self.ethdebug_info = target_contract.ethdebug_info
+                            self.ethdebug_parser = target_contract.parser
             # Internal functions
             elif step.op == "JUMPDEST":
                 call = self._detect_internal_call(step, i, current_contract, call_stack)
@@ -1232,18 +1313,89 @@ class TransactionTracer:
                     call.call_id = next_call_id
                     call.parent_call_id = call_stack[-1].call_id if call_stack else None
                     if call and hasattr(self, 'ethdebug_info') and self.ethdebug_info:
-                        # Pronađi ABI entry po imenu (ako nije overload)
-                        abi_entry = None
-                        for sel, abi in self.function_abis.items():
-                            if abi.get('name') == call.name:
-                                abi_entry = abi
-                                break
+                        # Find ABI entry by name using the name-based mapping
+                        abi_entry = self.function_abis_by_name.get(call.name)
                         if abi_entry:
                             args = []
                             for param in abi_entry.get('inputs', []):
                                 value = self.find_parameter_value_from_ethdebug(trace, i, param['name'], param['type'])
                                 args.append((param['name'], value))
                             call.args = args
+                    
+                    # If we don't have ethdebug info or couldn't find parameters, try reading from stack
+                    # For internal calls, parameters are passed via the stack
+                    if call and call.call_type == "internal" and (not call.args or all(v[1] is None for v in call.args)):
+                        # Find ABI entry by name using the name-based mapping
+                        abi_entry = self.function_abis_by_name.get(call.name)
+                        
+                        if abi_entry and step.stack:
+                            # First check if any parameter is a complex type
+                            has_complex_types = False
+                            for param in abi_entry.get('inputs', []):
+                                param_type = param['type']
+                                if (param_type.startswith('tuple') or '(' in param_type or 
+                                    param_type.endswith('[]') or '[' in param_type or
+                                    param_type in ['string', 'bytes']):
+                                    has_complex_types = True
+                                    break
+                            
+                            # If there are complex types, we can't reliably read any parameters
+                            # because we don't know how many stack slots they occupy
+                            if has_complex_types:
+                                # Keep the args as they were (likely None from ETHDebug attempt)
+                                # TODO: Implement support for complex types (structs, arrays, dynamic types)
+                                # This would require:
+                                # 1. Parsing the ABI type definitions to understand memory layout
+                                # 2. Calculating the number of stack slots each type occupies
+                                # 3. Properly decoding multi-slot values (e.g., struct fields, array elements)
+                                # 4. Handling dynamic types that use pointers to memory/storage
+                                pass
+                            else:
+                                args = []
+                                # For internal calls, parameters are typically at the end of the stack
+                                # The stack grows from left to right, so parameters are at higher indices
+                                num_params = len(abi_entry.get('inputs', []))
+                                
+                                # For internal calls, parameters are at the end of the stack in reverse order
+                                # Due to LIFO nature: increment3(arg1, arg2) -> stack has [.., arg1, arg2] 
+                                # where arg2 is at the top (higher index)
+                                
+                                for i, param in enumerate(abi_entry.get('inputs', [])):
+                                    param_name = param['name']
+                                    param_type = param['type']
+                                
+                                    
+                                    # Parameters are at the end of stack in reverse order due to LIFO
+                                    # First parameter is deepest, last parameter is at top
+                                    stack_idx = len(step.stack) - 1 - i
+                                    if 0 <= stack_idx < len(step.stack):
+                                        try:
+                                            raw_value = step.stack[stack_idx]
+                                            decoded_value = self.decode_value(raw_value, param_type)
+                                            args.append((param_name, decoded_value))
+                                        except:
+                                            # If that doesn't work, try looking for the value elsewhere in stack
+                                            # Sometimes the parameter is at a different position
+                                            found = False
+                                            for j in range(len(step.stack)-1, -1, -1):
+                                                try:
+                                                    raw_value = step.stack[j]
+                                                    # Check if this could be our parameter (for uint256, should be reasonable)
+                                                    if param_type.startswith('uint') and raw_value.startswith('0x'):
+                                                        val = int(raw_value, 16)
+                                                        if val > 0 and val < 1000000:  # Reasonable range
+                                                            decoded_value = self.decode_value(raw_value, param_type)
+                                                            args.append((param_name, decoded_value))
+                                                            found = True
+                                                            break
+                                                except:
+                                                    continue
+                                            if not found:
+                                                args.append((param_name, None))
+                                    else:
+                                        args.append((param_name, None))
+                                
+                                call.args = args
                     if call_stack:
                         # Only add as child if the depth is greater than parent
                         parent_call = call_stack[-1]
@@ -1261,15 +1413,27 @@ class TransactionTracer:
                     call_stack.append(call)
             # Exit from function
             elif step.op in ["RETURN", "REVERT", "STOP"]:
+                # If this is a REVERT, find and mark the deepest active frame (only once)
+                if step.op == "REVERT" and call_stack and not revert_already_marked:
+                    # The deepest frame (last in stack) is the one that initiated the revert
+                    call_stack[-1].caused_revert = True
+                    revert_already_marked = True
+                
                 while call_stack:
                     call = call_stack.pop()
                     call.exit_step = i
                     call.gas_used = trace.steps[call.entry_step].gas - step.gas
+                    
                     if call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
                         if context_stack:
                             context = context_stack.pop()
                             current_contract = context['contract']
                             current_depth = context['depth']
+                            # Restore ETHDebug info
+                            if 'ethdebug_info' in context:
+                                self.ethdebug_info = context['ethdebug_info']
+                            if 'ethdebug_parser' in context:
+                                self.ethdebug_parser = context['ethdebug_parser']
                             self._track_return_location(context['return_pc'])
                         break
                     else:
@@ -1462,22 +1626,32 @@ class TransactionTracer:
 
         # Try to decode function signature
         func_name = "unknown"
+        decoded_params = []
+        selector = None
+        
         if calldata and len(calldata) >= 10:  # 0x + 4 bytes
             selector = calldata[:10]
             if selector in self.function_signatures:
                 func_name = self.function_signatures[selector]['name']
+                # Decode the actual function parameters from calldata
+                decoded_params = self.decode_function_parameters(selector, calldata)
             else:
                 # Try 4byte directory lookup
                 func_name = self.lookup_function_signature(selector) or f"function_{selector}"
+                # For unknown functions, just show raw CALL parameters
+                decoded_params = [("to", to_addr), ("value", value), ("gas", gas)]
+        else:
+            # No calldata, show CALL parameters
+            decoded_params = [("to", to_addr), ("value", value), ("gas", gas)]
 
         return FunctionCall(
             name=f"{step.op} → {contract_name}::{func_name}",
-            selector=calldata[:10] if calldata else "",
+            selector=selector or "",
             entry_step=step_idx,
             exit_step=None,
             gas_used=0,
             depth=current_depth + 1,
-            args=[("to", to_addr), ("value", value), ("gas", gas)],
+            args=decoded_params,
             call_type=step.op,
             contract_address=to_addr
         )
@@ -1931,8 +2105,13 @@ class TransactionTracer:
         
         print(f"{dim('Gas used:')} {number(str(trace.gas_used))}")
         
-        if trace.error:
-            print(f"{error('Error:')} {trace.error}")
+        # Show transaction status
+        if trace.success:
+            print(f"{dim('Status:')} {success('SUCCESS')}")
+        else:
+            print(f"{dim('Status:')} {error('REVERTED')}")
+            if trace.error:
+                print(f"{error('Error:')} {trace.error}")
         
         print(f"\n{bold('Call Stack:')}")
         print(dim("-" * 60))
@@ -1955,14 +2134,20 @@ class TransactionTracer:
                 
                 # Add call type indicator with enhanced info for external calls
                 if call.call_type in ["CALL", "DELEGATECALL", "STATICCALL"]:
-                    # For external calls, show the target contract name if available
+                    # For external calls, check if we have debug info
+                    has_debug_info = False
                     target_info = ""
                     if self.multi_contract_parser and call.contract_address:
-                        # Extract target address from args
                         target_contract = self.multi_contract_parser.get_contract_at_address(call.contract_address)
                         if target_contract:
+                            has_debug_info = True
                             target_info = f" → {target_contract.name}"
-                    call_type_display = success(f"[{call.call_type}]{target_info}")
+                    
+                    # Add [non-verified] indicator for contracts without debug info
+                    if has_debug_info:
+                        call_type_display = success(f"[{call.call_type}]{target_info}")
+                    else:
+                        call_type_display = warning(f"[{call.call_type}] [non-verified]")
                 elif call.call_type == "external":
                     call_type_display = success("[external]")
                 elif call.call_type == "internal":
@@ -2010,7 +2195,9 @@ class TransactionTracer:
                     else:
                         source_info = dim(f" @ Contract entry point")
                 
-                print(f"{indent}#{i} {func_display} {call_type_display} {gas_info}{source_info}")
+                # Add indicator for the frame that caused the revert
+                revert_indicator = f" {error('!!!')}" if call.caused_revert else ""
+                print(f"{indent}#{i} {func_display} {call_type_display} {gas_info}{source_info}{revert_indicator}")
                 
                 # Show entry/exit steps for non-entry-point functions
                 if call.depth > 0:  # Show steps for actual function calls, not dispatcher
