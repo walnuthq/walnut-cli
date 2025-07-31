@@ -1,13 +1,15 @@
 # Walnut EVM Debugger
 
-A transaction-based debugger for Solidity smart contracts.
+A transaction-based debugger for the EVM and Solidity smart contracts.
 
-<img width="1417" alt="internal-calls" src="https://github.com/user-attachments/assets/3f795fcd-6db0-4ad8-a9e0-3466b2f4a39c" />
+![screenshot](reverted_transaction.png)
 
 ## Features
 
-1. Transaction tracing
-2. Transaction simulation
+1. Full transaction traces with internal calls
+2. Decoded arguments and results
+3. Transaction simulation
+4. Suport for custom RPC including local node (Anvil) or hosted
 
 **Requirements**: Solidity compiler 0.8.29+ (for ETHDebug support)
 
@@ -152,6 +154,10 @@ Deploy a Solidity contract with debug information:
 # Deploy your own contract
 ./scripts/deploy-contract.sh Counter src/Counter.sol
 
+# # Deploy Contract with Constructor Arguments
+./scripts/deploy-contract.sh Ballot examples/Ballot.sol \                                                                                     
+    '[0x416c696365000000000000000000000000000000000000000000000000000000, 0x426f620000000000000000000000000000000000000000000000000000000000, 0x436861726c696500000000000000000000000000000000000000000000000000]'
+
 # With custom settings
 ./scripts/deploy-contract.sh \
   --solc=/path/to/custom/solc \
@@ -202,6 +208,9 @@ walnut-cli trace 0x123...
 
 # Show raw execution trace
 walnut-cli trace 0x123... --raw
+
+# Output in JSON format
+walnut-cli trace 0x123... --ethdebug-dir ./debug --json
 ```
 
 This shows a high-level function call trace with gas usage and source mappings.
@@ -223,6 +232,11 @@ walnut-cli trace 0x123... \
 walnut-cli trace 0x123... \
     --ethdebug-dir 0x44c4...9d64:./debug_controller \
     --ethdebug-dir 0x82e8...43fb:./debug_counter
+
+# Or specify address:contract_name:path mapping
+walnut-cli trace 0x123... \
+    --ethdebug-dir 0x44c4...9d64:Controller:./debug_controller \
+    --ethdebug-dir 0x82e8...43fb:Counter:./debug_counter
 ```
 
 **Option 2: Contract mapping file**
@@ -328,8 +342,15 @@ walnut-cli simulate \
   --ethdebug-dir ./debug_struct \
   --from 0x286AF310eA3303c80eBE9a66F6998B21Bd8c1c29
 ```
-
 > Argument format is fully compatible with Foundry's `cast send` command (e.g. for structs: `'("Alice", 30)'`, for arrays: `'[("Alice", 30), ("Bob", 42)]'`).
+
+#### Example: Using raw calldata
+
+```bash
+walnut-cli simulate --raw-data 0x785bd74f000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000941636d6520436f727000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000002a0000000000000000000000000000000000000000000000000000000000000003426f620000000000000000000000000000000000000000000000000000000000 0xD7B5004e4124d26df1b03f3541e9653E706CCC40 \
+  --ethdebug-dir ./debug_example \
+  --from 0x286AF310eA3303c80eBE9a66F6998B21Bd8c1c29 
+```
 
 ## Debug Information Formats
 
@@ -472,18 +493,22 @@ Contract: TestContract
 Environment: runtime
 
 Function Call Trace: 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994
-Contract: 0x5FbDB2315678afecb367f032d93F642f64180aa3
-Gas used: 1225735
+Contract: 0x380A1C6b118036364d84C3ecD305C2C11761A26c
+Gas used: 50835
+Status: SUCCESS
 
 Call Stack:
 ------------------------------------------------------------
-#0 TestContract::runtime_dispatcher gas: 382 @ TestContract.sol:8
-  #1 increment [0x7cf5dab0] gas: 12141 @ TestContract.sol:23
+#0 TestContract::runtime_dispatcher [entry] gas: 29631 @ TestContract.sol:1
+  #1 increment [0x7cf5dab0] [external] gas: 29241 @ TestContract.sol:23
      steps: 99-966
-    #2 increment2 gas: 6322 @ TestContract.sol:39
+     amount: 23
+    #2 increment2 [internal] gas: 6322 @ TestContract.sol:39
        steps: 296-966
-      #3 increment3 gas: 5303 @ TestContract.sol:52
-         steps: 493-966
+       amount: 23
+      #3 increment3 [internal] gas: 5172 @ TestContract.sol:54
+         steps: 529-966
+         amount: 0
 ------------------------------------------------------------
 
 Use --raw flag to see detailed instruction trace
@@ -512,6 +537,38 @@ Step | PC   | Op              | Gas     | Stack
    5   8     LT               999987   [0] 0x04... [1] 0x24 <- HelloWorld.sol:4:1
 ...
 ```
+
+The output of reverted transaction
+
+```
+walnut-cli trace 0x9b0a8e0776cea556b7bb0c7946bf917ebaf5cb403ed3179e84c44c188c694db3 --ethdebug-dir debug_order --ethdebug-dir debug_payment --ethdebug-dir debug_logger --ethdebug-dir debug_shipping_manager --ethdebug-dir debug_tax_calculator --rpc http://localhost:8545
+Loading transaction 0x9b0a8e0776cea556b7bb0c7946bf917ebaf5cb403ed3179e84c44c188c694db3...
+
+Function Call Trace: 0x9b0a8e0776cea556b7bb0c7946bf917ebaf5cb403ed3179e84c44c188c694db3
+  OrderProcessor (0x59A714559B46c823d87986b5c5B7C630e2f5668d)
+  PaymentProcessor (0xf776FF56e2400e31f3070c1ac70Ab80433B01823)
+  Logger (0xdcDd1dd0ff17043f8bCD1AC9E5Be20BBEd4FAc0A)
+  ShippingManager (0xbE734aD6434E16f6bE04706005faED6fD38eb2B2)
+  TaxCalculator (0x6a85ebf0Eba5307943bDF27D02d198Bc64e9ffEd)
+Gas used: 38039
+Status: REVERTED
+Error: Order value must be positive
+
+Call Stack:
+------------------------------------------------------------
+#0 OrderProcessor::runtime_dispatcher [entry] gas: 15851 @ OrderProcessor.sol:1
+    #1 CALL → Logger::log(string) [0x41304fac] [CALL] → Logger gas: 3937
+       steps: 397-658
+       message: Starting order processing
+    #2 CALL → TaxCalculator::calculateTax(uint256,string) [0x55ec8a03] [CALL] → TaxCalculator gas: 4600 !!!
+       steps: 965-1241
+       value: 0
+       orderType: physical
+------------------------------------------------------------
+
+Use --raw flag to see detailed instruction trace
+```
+
 
 ## Run tests
 
