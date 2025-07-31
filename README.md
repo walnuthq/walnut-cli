@@ -1,13 +1,15 @@
 # Walnut EVM Debugger
 
-A transaction-based debugger for Solidity smart contracts.
+A transaction-based debugger for the EVM and Solidity smart contracts.
 
 ![screenshot](reverted_transaction.png)
 
 ## Features
 
-1. Transaction tracing
-2. Transaction simulation
+1. Full transaction traces with internal calls
+2. Decoded arguments and results
+3. Transaction simulation
+4. Suport for custom RPC including local node (Anvil) or hosted
 
 **Requirements**: Solidity compiler 0.8.29+ (for ETHDebug support)
 
