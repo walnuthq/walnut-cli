@@ -15,15 +15,12 @@ from .colors import *
 class EVMDebugger(cmd.Cmd):
     """Interactive EVM debugger REPL."""
     
-    intro = f"""
-{bold('Walnut EVM Debugger')} - Solidity Debugger
-Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging.
-    """
     prompt = f'{cyan("(walnut-cli)")} '
     
     def __init__(self, contract_address: str = None, debug_file: str = None, 
                  rpc_url: str = "http://localhost:8545", ethdebug_dir: str = None,
-                 multi_contract_parser = None):
+                 multi_contract_parser = None,function_name: str = None, function_args: List[str] = [],
+                 command_debug: bool = False):
         super().__init__()
         
         self.tracer = TransactionTracer(rpc_url)
@@ -59,7 +56,10 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
         self.dwarf_info = None
         self.source_lines = {}  # filename -> lines
         self.current_function = None  # Current function context
-        
+        self.function_name = function_name
+        self.function_args = function_args
+        self.command_debug = command_debug
+
         # Load ETHDebug info if available
         if ethdebug_dir:
             self.source_map = self.tracer.load_ethdebug_info(ethdebug_dir)
@@ -94,6 +94,9 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
         # Only print debug mappings message if we loaded them here (not passed from main)
         if self.source_map and not ethdebug_dir:
             print(f"Loaded {success(str(len(self.source_map)))} debug mappings")
+            
+        # Set initial intro message
+        self._set_intro_message()
     
     def _load_source_files(self):
         """Load all source files referenced in debug info."""
@@ -112,8 +115,34 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
                     self.source_lines[source_file] = f.readlines()
                 print(f"Loaded source: {info(source_file)}")
     
+    def _set_intro_message(self):
+        """Set the intro message based on command used."""
+        if self.current_trace:
+            # Trace is already loaded
+            self.intro = f"""
+{bold('Walnut EVM Debugger')} - Solidity Debugger
+Trace loaded and ready for debugging. Type {info('help')} for commands.
+Use {info('next')}/{info('nexti')} to step, {info('continue')} to run, {info('where')} to see call stack.
+    """
+        else:
+            # No trace loaded, need to load one
+            if self.command_debug:
+                self.intro = f"""
+{bold('Walnut EVM Debugger')} - Solidity Debugger
+Type {info('help')} for commands. Use {info('run')} to debug a transaction."""
+            else:
+                self.intro = f"""{bold('Walnut EVM Debugger')} - Solidity Debugger
+Type {info('help')} for commands. Use {info('run')} to debug a transaction."""
+                
+                self.intro += f"""{bold('Walnut EVM Debugger')} - Solidity Debugger
+Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific transaction for debugging.
+    """
+
     def do_run(self, tx_hash: str):
         """Run/load a transaction for debugging. Usage: run <tx_hash>"""
+        if self.command_debug:
+            self.do_interactive()
+            return
         if not tx_hash:
             print("Usage: run <tx_hash>")
             return
@@ -137,6 +166,136 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             self._show_current_state()
         except Exception as e:
             print(f"{error('Error loading transaction:')} {e}")
+    
+    def do_interactive(self):
+        """Simulate a function call for debugging. Usage: interactive <function_name> [args...]"""
+ 
+        if not self.contract_address:
+            print(f"{warning('Warning:')} No contract address set. Using default for simulation.")
+            return
+        else:
+            contract_addr = self.contract_address
+        
+        try:
+            # Parse function call
+            function_name = str(self.function_name)
+            function_args = self.function_args
+            
+
+            print(f"Simulating {info(function_name)}({', '.join(function_args)})...")
+            
+            # Encode function call
+            calldata = self._encode_function_call(function_name, function_args)
+            if not calldata:
+                print(f"{error('Failed to encode function call.')} Check function name and arguments.")
+                return
+            
+            # Create simulation using tracer
+            from_addr = "0x" + "0" * 40  # Default sender address
+            self.current_trace = self.tracer.simulate_call_trace(
+                to=contract_addr,
+                from_=from_addr, 
+                calldata=calldata,
+                block=None  # Use latest block
+            )
+            
+            if not self.current_trace:
+                print(f"{error('Simulation failed.')} Check function name and arguments.")
+                return
+                
+            self.current_step = 0
+            
+            # Analyze function calls
+            self.function_trace = self.tracer.analyze_function_calls(self.current_trace)
+            
+            print(f"{success('Simulation complete.')} {highlight(str(len(self.current_trace.steps)))} steps.")
+            print(f"Type {info('continue')} to run, {info('next')} to step by source line, {info('nexti')} to step by instruction")
+            
+            # Start at the first function call after dispatcher
+            if len(self.function_trace) > 1:
+                self.current_step = self.function_trace[1].entry_step
+                self.current_function = self.function_trace[1]
+            else:
+                # If no function dispatcher, start at beginning but avoid end-of-execution
+                self.current_step = 0
+            
+            self._show_current_state()
+            
+        except Exception as e:
+            print(f"{error('Error in simulation:')} {e}")
+            import traceback
+            print(f"{dim('Details:')} {traceback.format_exc()}")
+    
+    def _encode_function_call(self, function_name: str, args: list) -> Optional[str]:
+        """Encode a function call into calldata."""
+        if not hasattr(self.tracer, 'function_abis_by_name'):
+            print(f"{error('No ABI information available.')}")
+            return None
+
+        function_name = function_name.split('(')[0]  # Remove any parameter list
+        if function_name not in self.tracer.function_abis_by_name:
+            print(f"{error('Function not found:')} {function_name}")
+            if self.tracer.function_abis_by_name:
+                available = list(self.tracer.function_abis_by_name.keys())
+                print(f"Available functions: {', '.join(available)}")
+            return None
+        
+        func_abi = self.tracer.function_abis_by_name[function_name]
+        inputs = func_abi.get('inputs', [])
+        
+        if len(args) != len(inputs):
+            param_str = ', '.join([f"{inp['type']} {inp['name']}" for inp in inputs])
+            print(f"{error('Argument count mismatch.')} Expected: {function_name}({param_str})")
+            return None
+        
+        try:
+            # Import web3 contract encoder
+            from web3 import Web3
+            
+            # Convert string arguments to appropriate types
+            converted_args = []
+            for i, arg in enumerate(args):
+                param_type = inputs[i]['type']
+                converted_arg = self._convert_argument(arg, param_type)
+                converted_args.append(converted_arg)
+            
+            # Create a dummy contract to encode the function call
+            w3 = Web3()
+            contract = w3.eth.contract(abi=[func_abi])
+            
+            # Get the function and encode the call
+            func = getattr(contract.functions, function_name)
+            encoded = func(*converted_args).build_transaction({'to': '0x' + '0' * 40})
+            
+            return encoded['data']
+            
+        except Exception as e:
+            print(f"{error('Error encoding function call:')} {e}")
+            return None
+    
+    def _convert_argument(self, arg: str, param_type: str):
+        """Convert string argument to appropriate type for ABI encoding."""
+        if param_type.startswith('uint') or param_type.startswith('int'):
+            return int(arg)
+        elif param_type == 'bool':
+            return arg.lower() in ('true', '1', 'yes')
+        elif param_type == 'address':
+            if not arg.startswith('0x'):
+                arg = '0x' + arg
+            return arg
+        elif param_type == 'string':
+            return arg
+        elif param_type.startswith('bytes'):
+            if not arg.startswith('0x'):
+                arg = '0x' + arg
+            return arg
+        else:
+            # For complex types, try to parse as JSON or return as string
+            try:
+                import json
+                return json.loads(arg)
+            except:
+                return arg
     
     def do_nexti(self, arg):
         """Step to next instruction (instruction-level). Aliases: ni, stepi, si"""
@@ -1237,6 +1396,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             # Execution Control
             print(f"\n{cyan('Execution Control:')}")
             print(f"  {info('run')} <tx_hash>     - Load and debug a transaction")
+            print(f"  {info('interactive')} <func> - Simulate a function call for debugging")
             print(f"  {info('next')} (n/step/s)   - Step to next source line")
             print(f"  {info('nexti')} (ni/stepi)  - Step to next instruction")  
             print(f"  {info('continue')} (c)      - Continue execution")
