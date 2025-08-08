@@ -130,13 +130,10 @@ Use {info('next')}/{info('nexti')} to step, {info('continue')} to run, {info('wh
                 self.intro = f"""
 {bold('Walnut EVM Debugger')} - Solidity Debugger
 Type {info('help')} for commands. Use {info('run')} to debug a transaction."""
-            else:
+            else:                
                 self.intro = f"""{bold('Walnut EVM Debugger')} - Solidity Debugger
-Type {info('help')} for commands. Use {info('run')} to debug a transaction."""
-                
-                self.intro += f"""{bold('Walnut EVM Debugger')} - Solidity Debugger
 Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific transaction for debugging.
-    """
+"""
 
     def do_run(self, tx_hash: str):
         """Run/load a transaction for debugging. Usage: run <tx_hash>"""
@@ -1396,7 +1393,6 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific
             # Execution Control
             print(f"\n{cyan('Execution Control:')}")
             print(f"  {info('run')} <tx_hash>     - Load and debug a transaction")
-            print(f"  {info('interactive')} <func> - Simulate a function call for debugging")
             print(f"  {info('next')} (n/step/s)   - Step to next source line")
             print(f"  {info('nexti')} (ni/stepi)  - Step to next instruction")  
             print(f"  {info('continue')} (c)      - Continue execution")
