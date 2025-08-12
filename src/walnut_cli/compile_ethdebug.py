@@ -13,7 +13,7 @@ from typing import Optional
 from .compiler_config import CompilerConfig, CompilationError, dual_compile
 
 
-def main():
+def main(args=None):
     parser = argparse.ArgumentParser(
         description="Compile Solidity contracts with ETHDebug support"
     )
@@ -84,12 +84,12 @@ def main():
                 print(f"✓ Solidity {version_info['version']} supports ETHDebug")
             else:
                 print(f"✗ {version_info['error']}")
-        sys.exit(0 if version_info["supported"] else 1)
-    
+        return 0 if version_info["supported"] else 1  # changed from sys.exit
+
     # Verify contract file exists
     if not Path(args.contract_file).exists():
         print(f"Error: Contract file '{args.contract_file}' not found", file=sys.stderr)
-        sys.exit(1)
+        return 1
     
     # Save configuration if requested
     if args.save_config:
@@ -99,7 +99,7 @@ def main():
                 print("✓ Configuration saved to walnut.config.yaml")
         except Exception as e:
             print(f"Error saving configuration: {e}", file=sys.stderr)
-            sys.exit(1)
+            return 1
     
     try:
         if args.dual_compile:
@@ -135,8 +135,7 @@ def main():
                             print(f"    - {contract_name}_ethdebug-runtime.json")
                 else:
                     print(f"✗ ETHDebug build failed: {results['debug'].get('error', 'Unknown error')}")
-                    sys.exit(1)
-        
+                    return 1
         else:
             # ETHDebug compilation only
             result = config.compile_with_ethdebug(args.contract_file)
@@ -173,14 +172,53 @@ def main():
             print(json.dumps({"success": False, "error": str(e)}, indent=2))
         else:
             print(f"Compilation failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1
     except Exception as e:
         if args.json:
             print(json.dumps({"success": False, "error": str(e)}, indent=2))
         else:
             print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1   
+
+    return 0
+
+def compile_ethdebug_run(
+    contract_file: str,
+    solc_path: str = "solc",
+    debug_output_dir: str = "./build/debug/ethdebug",
+    production_dir: str = "./build/contracts",
+    dual: bool = False,
+    verify_version: bool = False,
+    save_config: bool = False,
+    json_mode: bool = False
+) -> dict:
+    """
+    Programmatic API. Returns result dict (same structure as CLI).
+    Does NOT call sys.exit.
+    """
+    config = CompilerConfig(
+        solc_path=solc_path,
+        debug_output_dir=debug_output_dir,
+        build_dir=production_dir
+    )
+
+    if verify_version:
+        version_info = config.verify_solc_version()
+        return {"mode": "verify_version", **version_info}
+
+    if save_config:
+        config.save_to_walnut_config()
+        return {"mode": "save_config", "saved": True}
+
+    if not Path(contract_file).exists():
+        raise FileNotFoundError(f"Contract file '{contract_file}' not found")
+
+    if dual:
+        return dual_compile(contract_file, config)
+    else:
+        return config.compile_with_ethdebug(contract_file)
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())
