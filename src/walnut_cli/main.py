@@ -380,6 +380,7 @@ def simulate_command(args):
         function_calls = tracer.analyze_function_calls(trace)
         if getattr(args, 'json', False):
             serializer = TraceSerializer()
+            tracer.to_addr = args.contract_address
             json_output = serializer.serialize_trace(
                 trace,
                 function_calls,
@@ -388,40 +389,6 @@ def simulate_command(args):
                 tracer
             )
             print(json.dumps(json_output, indent=2))
-        elif getattr(args, 'interactive', False):
-            # Start interactive debugger
-            print("\nStarting interactive debugger...")
-            
-            debugger = EVMDebugger(
-                contract_address=args.contract_address,
-                debug_file=None,
-                rpc_url=args.rpc_url,
-                ethdebug_dir=ethdebug_dirs[0] if ethdebug_dirs else None,
-                multi_contract_parser=getattr(tracer, 'multi_contract_parser', None)
-            )
-            
-            # Pre-load the trace and function analysis
-            debugger.current_trace = trace
-            debugger.current_step = 0
-            debugger.function_trace = function_calls
-            
-            # Set dynamic intro message based on pre-loaded trace
-            debugger._set_intro_message()
-            
-            # Start at first meaningful function, but be conservative
-            if len(function_calls) > 1:
-                # Check if the first function after dispatcher is reasonable
-                first_func = function_calls[1]
-                if first_func.entry_step < len(trace.steps) - 10:  # Leave some room at the end
-                    debugger.current_step = first_func.entry_step
-                    debugger.current_function = first_func
-                # Otherwise, stay at step 0
-            
-            # Start REPL
-            try:
-                debugger.cmdloop()
-            except KeyboardInterrupt:
-                print("\nInterrupted")
         else:
             tracer.print_function_trace(trace, function_calls)
         return 0
@@ -524,6 +491,7 @@ def simulate_command(args):
     function_calls = tracer.analyze_function_calls(trace)
     if getattr(args, 'json', False):
         serializer = TraceSerializer()
+        tracer.to_addr = args.contract_address
         json_output = serializer.serialize_trace(
             trace,
             function_calls,
@@ -532,87 +500,76 @@ def simulate_command(args):
             tracer
         )
         print(json.dumps(json_output, indent=2))
-    elif getattr(args, 'interactive', False):
-        # Start interactive debugger
-        print("\nStarting interactive debugger...")
-        
-        debugger = EVMDebugger(
-            contract_address=args.contract_address,
-            debug_file=None,
-            rpc_url=args.rpc_url,
-            ethdebug_dir=ethdebug_dirs[0] if ethdebug_dirs else None,
-            multi_contract_parser=getattr(tracer, 'multi_contract_parser', None)
-        )
-        
-        # Pre-load the trace and function analysis
-        debugger.current_trace = trace
-        debugger.current_step = 0
-        debugger.function_trace = function_calls
-        
-        # Set dynamic intro message based on pre-loaded trace
-        debugger._set_intro_message()
-        
-        # Start at first meaningful function, but be conservative
-        if len(function_calls) > 1:
-            # Check if the first function after dispatcher is reasonable
-            first_func = function_calls[1]
-            if first_func.entry_step < len(trace.steps) - 10:  # Leave some room at the end
-                debugger.current_step = first_func.entry_step
-                debugger.current_function = first_func
-            # Otherwise, stay at step 0
-        
-        # Start REPL
-        try:
-            debugger.cmdloop()
-        except KeyboardInterrupt:
-            print("\nInterrupted")
     else:
         tracer.print_function_trace(trace, function_calls)
     return 0
 
 def debug_command(args):
     """Execute the debug command."""
-    
-    # This workflow handles auto-compiling and deploying a contract file.
+    contract_address = None
+    ethdebug_dir = None
+
     if args.contract_file:
         try:
             session = AutoDeployDebugger(
                 contract_file=args.contract_file,
                 rpc_url=args.rpc,
-                constructor_args=getattr(args, 'constructor_args', [])
+                constructor_args=getattr(args, 'constructor_args', []),
+                solc_path=args.solc_path,
+                dual_compile=args.dual_compile,
+                keep_build=args.keep_build,
+                output_dir=args.output_dir,
+                production_dir=args.production_dir,
+                json_output=args.json,
+                save_config=args.save_config,
+                verify_version=args.verify_version,
+                use_cache=not args.no_cache,
+                cache_dir=args.cache_dir,
+                fork_url=args.fork_url,
+                fork_block=args.fork_block,
+                auto_snapshot=not args.no_snapshot
             )
-            # Pass the function and args to run after deployment
-            session.run(
-                function_name=getattr(args, 'function', None),
-                function_args=getattr(args, 'args', [])
-            )
-
             contract_address = session.contract_address
             ethdebug_dir = str(session.debug_dir)
+            abi_path = str(session.abi_path)
+            
         except Exception as e:
             print(error(f"Debug session failed: {e}"))
             return 1
-
-    # This workflow attaches to an already deployed contract.
     elif args.contract_address:
         if not args.ethdebug_dir:
             print(error("Error: --ethdebug-dir is required when using --contract-address."))
             return 1
+        contract_address = args.contract_address
+        ethdebug_dir = args.ethdebug_dir
+    else:
+        print(error("Either --contract-file or --contract-address required"))
+        return 1
             
     print("\nStarting debugger...")
     debugger = EVMDebugger(
-        contract_address=contract_address,
+        contract_address=str(contract_address),
         rpc_url=args.rpc,
         ethdebug_dir=ethdebug_dir,
         function_name=getattr(args, 'function', None),
         function_args=getattr(args, 'args', []),
-        command_debug=True
+        command_debug=True,
+        abi_path=abi_path
     )
-        
+
+    # Baseline snapshot (unless disabled)
+    if not args.no_snapshot:
+        debugger.tracer.snapshot_state()
+
     try:
         debugger.cmdloop()
+        if args.fork_url:
+            session.cleanup()
     except KeyboardInterrupt:
         print("\nInterrupted")
+        if args.fork_url:
+            print("Stopping anvil fork...")
+            session.cleanup()
         return 1
     
     return 0
@@ -633,12 +590,24 @@ def main():
     contract_group = debug_parser.add_mutually_exclusive_group(required=True)
     contract_group.add_argument('--contract-file', '-c', help='Path to Solidity source file to auto-compile and deploy.')
     contract_group.add_argument('--contract-address', help='Address of an already deployed contract to attach to.')
-
     debug_parser.add_argument('--ethdebug-dir', '-e', help='ETHDebug directory (required if using --contract-address)')
     debug_parser.add_argument('--function', '-f', help='Function to simulate on start.')
     debug_parser.add_argument('--args', nargs='*', default=[], help='A list of arguments for the function.')
     debug_parser.add_argument('--constructor-args', nargs='*', default=[], help='A list of arguments for the contract constructor.')
-
+    debug_parser.add_argument('--solc-path', '-solc', default='solc', help='Path to solc binary (default: solc)')
+    debug_parser.add_argument('--dual-compile', action='store_true', help='Create both optimized production and debug builds')
+    debug_parser.add_argument('--keep-build', action='store_true', help='Keep build directory after compilation (default: False)')
+    debug_parser.add_argument('--output-dir', '-o', default='./build/debug/ethdebug', help='Output directory for ETHDebug files (default: ./build/debug/ethdebug)')
+    debug_parser.add_argument('--production-dir', default='./build/contracts', help='Production directory for compiled contracts (default: ./build/contracts)')
+    debug_parser.add_argument('--json', action='store_true', help='Output results as JSON')
+    debug_parser.add_argument('--save-config', action='store_true', help='Save configuration to walnut.config.yaml')
+    debug_parser.add_argument('--verify-version', action='store_true', help='Verify solc version supports ETHDebug and exit')
+    debug_parser.add_argument('--no-cache', action='store_true', default=False, help='Enable deployment cache')
+    debug_parser.add_argument('--cache-dir', default='.walnut_cache', help='Cache directory')
+    debug_parser.add_argument('--fork-url', help='Upstream RPC URL to fork (launch anvil)')
+    debug_parser.add_argument('--fork-block', type=int, help='Specific block number to fork')
+    debug_parser.add_argument('--no-snapshot', action='store_true',default=False, help='Disable automatic initial snapshot')
+    
     # Create the 'trace' subcommand
     trace_parser = subparsers.add_parser('trace', help='Trace and debug an Ethereum transaction')
     trace_parser.add_argument('tx_hash', help='Transaction hash to trace')

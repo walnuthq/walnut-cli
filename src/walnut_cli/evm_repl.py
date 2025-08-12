@@ -18,9 +18,9 @@ class EVMDebugger(cmd.Cmd):
     prompt = f'{cyan("(walnut-cli)")} '
     
     def __init__(self, contract_address: str = None, debug_file: str = None, 
-                 rpc_url: str = "http://localhost:8545", ethdebug_dir: str = None,
+                 rpc_url: str = "http://localhost:8545", ethdebug_dir: str = None, constructor_args: List[str] = [],
                  multi_contract_parser = None,function_name: str = None, function_args: List[str] = [],
-                 command_debug: bool = False):
+                 command_debug: bool = False, abi_path: str = None):
         super().__init__()
         
         self.tracer = TransactionTracer(rpc_url)
@@ -49,6 +49,7 @@ class EVMDebugger(cmd.Cmd):
         
         # Load contract and debug info
         self.contract_address = contract_address
+        self.constructor_args = constructor_args or []
         self.debug_file = debug_file
         self.ethdebug_dir = ethdebug_dir
         self.source_map = {}
@@ -59,16 +60,17 @@ class EVMDebugger(cmd.Cmd):
         self.function_name = function_name
         self.function_args = function_args
         self.command_debug = command_debug
+        self.abi_path = abi_path
 
         # Load ETHDebug info if available
         if ethdebug_dir:
             self.source_map = self.tracer.load_ethdebug_info(ethdebug_dir)
+            
             # Load ABI from ethdebug directory
             if self.tracer.ethdebug_info:
-                abi_path = os.path.join(ethdebug_dir, f"{self.tracer.ethdebug_info.contract_name}.abi")
-                if os.path.exists(abi_path):
-                    self.tracer.load_abi(abi_path)
-            
+                if os.path.exists(self.abi_path):
+                    self.tracer.load_abi(self.abi_path)
+
         elif debug_file:
             self.source_map = self.tracer.load_debug_info(debug_file)
             
@@ -138,7 +140,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific
     def do_run(self, tx_hash: str):
         """Run/load a transaction for debugging. Usage: run <tx_hash>"""
         if self.command_debug:
-            self.do_interactive()
+            self._do_interactive()
             return
         if not tx_hash:
             print("Usage: run <tx_hash>")
@@ -164,7 +166,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific
         except Exception as e:
             print(f"{error('Error loading transaction:')} {e}")
     
-    def do_interactive(self):
+    def _do_interactive(self):
         """Simulate a function call for debugging. Usage: interactive <function_name> [args...]"""
  
         if not self.contract_address:
@@ -230,6 +232,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific
             return None
 
         function_name = function_name.split('(')[0]  # Remove any parameter list
+        
         if function_name not in self.tracer.function_abis_by_name:
             print(f"{error('Function not found:')} {function_name}")
             if self.tracer.function_abis_by_name:
@@ -1379,7 +1382,24 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific
         """Handle unknown commands."""
         print(f"{error('Unknown command:')} '{line}'")
         print(f"Type {info('help')} to see available commands.")
-    
+
+    def do_snapshot(self, _):
+        """Create an EVM snapshot (returns id)."""
+        if not getattr(self, "tracer", None) or not hasattr(self.tracer, "snapshot_state"):
+            print("Snapshot not available.")
+            return
+        sid = self.tracer.snapshot_state()
+        print(f"Snapshot: {sid}" if sid else "Snapshot failed.")
+
+    def do_revert(self, arg):
+        """Revert to a snapshot. Usage: revert [snapshot_id] (omit to revert to baseline)"""
+        if not getattr(self, "tracer", None) or not hasattr(self.tracer, "revert_state"):
+            print("Revert not available.")
+            return
+        target = arg.strip() or None
+        ok = self.tracer.revert_state(target)
+        print("Reverted." if ok else "Revert failed.")
+
     def do_help(self, arg):
         """Show help information."""
         if arg:
