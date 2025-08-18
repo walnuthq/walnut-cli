@@ -508,7 +508,7 @@ def debug_command(args):
     """Execute the debug command."""
     contract_address = None
     ethdebug_dir = None
-
+    session = None
     if args.contract_file:
         try:
             session = AutoDeployDebugger(
@@ -527,7 +527,10 @@ def debug_command(args):
                 cache_dir=args.cache_dir,
                 fork_url=args.fork_url,
                 fork_block=args.fork_block,
-                auto_snapshot=not args.no_snapshot
+                auto_snapshot=not args.no_snapshot,
+                keep_fork=args.keep_fork,
+                reuse_fork=args.reuse_fork,
+                fork_port=args.fork_port,
             )
             contract_address = session.contract_address
             ethdebug_dir = str(session.debug_dir)
@@ -549,7 +552,7 @@ def debug_command(args):
     print("\nStarting debugger...")
     debugger = EVMDebugger(
         contract_address=str(contract_address),
-        rpc_url=args.rpc,
+        rpc_url=(session.rpc_url if session else args.rpc),
         ethdebug_dir=ethdebug_dir,
         function_name=getattr(args, 'function', None),
         function_args=getattr(args, 'args', []),
@@ -563,11 +566,11 @@ def debug_command(args):
 
     try:
         debugger.cmdloop()
-        if args.fork_url:
+        if args.fork_url and session and not args.keep_fork:
             session.cleanup()
     except KeyboardInterrupt:
         print("\nInterrupted")
-        if args.fork_url:
+        if args.fork_url and session and not args.keep_fork:
             print("Stopping anvil fork...")
             session.cleanup()
         return 1
@@ -606,6 +609,9 @@ def main():
     debug_parser.add_argument('--cache-dir', default='.walnut_cache', help='Cache directory')
     debug_parser.add_argument('--fork-url', help='Upstream RPC URL to fork (launch anvil)')
     debug_parser.add_argument('--fork-block', type=int, help='Specific block number to fork')
+    debug_parser.add_argument('--fork-port', type=int, default=8545, help='Local fork port (default: 8545)')
+    debug_parser.add_argument('--keep-fork', action='store_true', help='Do not terminate the forked node on exit')
+    debug_parser.add_argument('--reuse-fork', action='store_true', help='Reuse an existing local fork if available on --fork-port')
     debug_parser.add_argument('--no-snapshot', action='store_true',default=False, help='Disable automatic initial snapshot')
     
     # Create the 'trace' subcommand

@@ -34,7 +34,10 @@ class AutoDeployDebugger:
         fork_url: str = None,
         fork_block: int = None,
         auto_snapshot: bool = True,
-        constructor_args: list = []
+        constructor_args: list = [],
+        keep_fork: bool = False,
+        reuse_fork: bool = False,
+        fork_port: int = 8545,
     ):
         self.contract_path = Path(contract_file)
         if not self.contract_path.exists():
@@ -71,28 +74,78 @@ class AutoDeployDebugger:
         self.fork_block = fork_block
         self._fork_proc: subprocess.Popen | None = None
         self.auto_snapshot = auto_snapshot
-        # start fork if requested
-        if self.fork_url:
-            self._launch_fork()
+        self.keep_fork = keep_fork
+        self.reuse_fork = reuse_fork
+        self.fork_port = fork_port
+        # connect to existing fork or launch a new one (if configured)
+        self.connect_or_launch_fork()
         # workflow
         if not self._try_cache_hit():
             self.compile_contract()
             self.deploy_contract()
             self._store_cache()
 
+    def connect_or_launch_fork(self):
+        """
+        If --reuse-fork is set, try to connect to an existing local dev node (anvil/hardhat)
+        on --fork-port even when --fork-url is not provided. Otherwise, launch a new fork
+        only when --fork-url is specified.
+        """
+        target_rpc = f"http://127.0.0.1:{self.fork_port}"
+        if self.reuse_fork and self._is_local_fork_running(target_rpc):
+            print(info(f"[FORK] reusing existing fork at {target_rpc}"))
+            self.rpc_url = target_rpc
+            return
+        if self.fork_url:
+            self._launch_fork()
+            return
+        # No reuse and no fork_url: keep self.rpc_url as provided (e.g., local node)
+
     def _launch_fork(self):
+        # Reuse existing local fork if asked and reachable
+        target_rpc = f"http://127.0.0.1:{self.fork_port}"
+        if self.reuse_fork and self._is_local_fork_running(target_rpc): 
+            print(info(f"[FORK] reusing existing fork at {target_rpc}"))
+            self.rpc_url = target_rpc
+            return
         print(info(f"[FORK] starting anvil fork from {self.fork_url}" + (f" @ block {self.fork_block}" if self.fork_block else "")))
-        args = ["anvil","--fork-url", self.fork_url]
+        args = ["anvil", "--fork-url", self.fork_url, "--port", str(self.fork_port)]
         if self.fork_block is not None:
             args += ["--fork-block-number", str(self.fork_block)]
         self._fork_proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        # wait brief
-        time.sleep(1)
+        self.rpc_url = target_rpc
+        # wait until responsive
+        for _ in range(50):
+            try:
+                w3 = Web3(Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": 0.2}))
+                if w3.is_connected():
+                    _ = w3.eth.block_number
+                    break
+            except Exception:
+                pass
+            time.sleep(0.1)
+            
+    def _is_local_fork_running(self, url: str) -> bool:
+        try:
+            w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 0.2}))
+            if not w3.is_connected():
+                return False
+            # Try client version to ensure it’s a dev node (anvil/hardhat)
+            try:
+                ver = w3.client_version
+            except Exception:
+                ver = w3.provider.make_request("web3_clientVersion", []).get("result", "")
+            return isinstance(ver, str) and ("anvil" in ver.lower() or "hardhat" in ver.lower())
+        except Exception:
+            return False
 
     def cleanup(self):
         try:
             if self._fork_proc and self._fork_proc.poll() is None:
-                self._fork_proc.terminate()
+                if self.keep_fork:
+                    print(info(f"[FORK] keeping fork alive at {self.rpc_url}"))
+                else:
+                    self._fork_proc.terminate()
         except Exception:
             pass
         
@@ -126,8 +179,9 @@ class AutoDeployDebugger:
             if info_json.get("chain_id") != chain_id:
                 return False
             addr = info_json["address"]
+            
             on_chain_code = w3.eth.get_code(addr).hex()
-            if on_chain_code != info_json.get("runtime_code"):
+            if on_chain_code != info_json.get("runtime_code", ""):
                 return False
             # hydrate
             self.contract_address = addr
