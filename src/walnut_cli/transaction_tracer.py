@@ -454,7 +454,7 @@ class TransactionTracer:
        
         # Call debug_traceCall
         try:
-            trace_config = {"disableStorage": False, "disableMemory": False}
+            trace_config = {"disableStorage": False, "disableMemory": False, "enableMemory": True}
             if tx_index is not None:
                 trace_config["txIndex"] = tx_index
             # Block param
