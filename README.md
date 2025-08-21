@@ -1,3 +1,5 @@
+> ⚠️ SolDB is currently in **public beta** – not yet recommended for production use. Expect bugs, missing features, and breaking changes.
+
 # SolDB EVM Debugger
 
 A CLI debugger for the EVM and Solidity.
