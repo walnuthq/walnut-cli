@@ -2,8 +2,9 @@ cache/
 debug/
 debug*/
 out/
-walnut.config.yaml
-walnut.config.local
 __pycache__/
 *.txt
-src/walnut_cli.egg-info/PKG-INFO
+src/soldb.egg-info/PKG-INFO
+
+examples/test_debug/
+test/Output/

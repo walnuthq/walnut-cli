@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for walnut-cli
+Main entry point for soldb
 """
 
 import sys
@@ -57,7 +57,7 @@ def trace_command(args):
         if args.json:
             # Output minimal JSON with error
             json_output = {
-                "walnutCLIFailed": "debug_traceTransaction unavailable",
+                "soldbFailed": "debug_traceTransaction unavailable",
                 "tx_hash": trace.tx_hash,
                 "from": trace.from_addr,
                 "to": trace.to_addr,
@@ -342,6 +342,12 @@ def simulate_command(args):
             for abi_file in Path(primary_contract.debug_dir).glob("*.abi"):
                 tracer.load_abi(str(abi_file))
                 break
+        # Load ABIs for ALL contracts that might be called during simulation
+        for addr, contract_info in multi_parser.contracts.items():
+            abi_path = contract_info.debug_dir / f"{contract_info.name}.abi"
+            if abi_path.exists():
+                tracer.load_abi(str(abi_path))
+                
     elif ethdebug_dirs:
         # Single contract mode (backward compatibility)
         ethdebug_dir = ethdebug_dirs[0]
@@ -355,9 +361,13 @@ def simulate_command(args):
                 tracer.load_abi(str(abi_file))
                 break
     else:
-        print('Error: --ethdebug-dir is required for simulate')
-        sys.exit(1)
-
+        # No debug info provided - simulate without source code
+        # Try to load ABI from common locations if available
+        if args.contract_address:
+            # Try to find ABI in current directory
+            for abi_file in Path(".").glob("*.abi"):
+                tracer.load_abi(str(abi_file))
+                break
     # If raw_data is provided, use it directly as calldata
     if getattr(args, 'raw_data', None):
         calldata = args.raw_data
@@ -582,7 +592,7 @@ def debug_command(args):
     return 0
 
 def main():
-    parser = argparse.ArgumentParser(description='Walnut CLI - Ethereum transaction analysis tool')
+    parser = argparse.ArgumentParser(description='SolDB - Ethereum transaction analysis tool')
     parser.add_argument('--version', '-v', action='version', version='%(prog)s 0.1.0')
     
     # Create subparsers for different commands

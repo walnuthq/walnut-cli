@@ -1,6 +1,6 @@
-# Walnut EVM Debugger
+# SolDB EVM Debugger
 
-A transaction-based debugger for the EVM and Solidity smart contracts.
+A CLI debugger for the EVM and Solidity.
 
 ![screenshot](reverted_transaction.png)
 
@@ -17,10 +17,12 @@ A transaction-based debugger for the EVM and Solidity smart contracts.
 
 ### 1. Prerequisites
 
-Before installing Walnut-CLI, ensure you have the following:
+Before installing SolDB, ensure you have the following:
 
-- **Python 3.7+** (for Walnut itself)
+- **Python 3.7+** (for SolDB itself)
 - **Solidity compiler** (version 0.8.29+ for ETHDebug support)
+
+For testing infrastructure, we need:
 - **Foundry** (for contract deployment and Anvil node)
 
 **Install Solidity:**
@@ -43,198 +45,58 @@ foundryup
 
 ---
 
-### 2. Install Walnut-CLI
+### 2. Install SolDB
 
-You can install Walnut either from source (recommended) or from PyPI.
-
-#### **A. Install from Source (Recommended)**
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/walnuthq/walnut-cli.git
-   cd walnut-cli
-   ```
-2. **Set up a Python virtual environment:**
-   ```bash
-   python3 -m venv MyEnv
-   source MyEnv/bin/activate
-   ```
-3. **Install Python dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-4. **Install Walnut-CLI in editable mode:**
-   ```bash
-   pip install -e .
-   ```
-
-#### **B. Install from PyPI**
-> **Note:** The PyPI package may be less up-to-date.
-```bash
-pip install walnut-cli
-```
-
----
-
-### 3. Initial Setup
-
-After installation, run the setup script to configure your environment:
-
-- **If running from source:**
-  ```bash
-  ./setup-walnut.sh
-  ```
-- **If installed via PyPI:**
-  ```bash
-  walnut-setup
-  ```
-
-This will:
-- Check for Solidity compiler with ETHDebug support (0.8.29+)
-- Configure RPC endpoint (default: http://localhost:8545 for Anvil)
-- Configure private key (default: Anvil's test account #0)
-- Create `walnut.config.local` with your settings
-
----
-
-### 4. Verify Your Setup
+#### **Install from GitHub**
 
 ```bash
-./test-setup.sh   # Test configuration (if running from source)
+pip install git+https://github.com/walnuthq/soldb.git
 ```
 
----
-
-### 5. Next Steps
-
-- See [Usage](#usage) for how to deploy, interact, and debug contracts.
-- See [Configuration](#configuration) for advanced settings.
+NOTE: Since we are still in BETA, the PyPI package is not available at the moment.
 
 ---
-
-## Configuration
-
-Configuration is stored in `walnut.config.local` (gitignored). You can also:
-
-- Override settings with environment variables
-- Use command-line options for specific tools
-
-### Configuration Options
-
-```bash
-# Ethereum RPC endpoint
-RPC_URL="http://localhost:8545"
-
-# Private key for deployments (default: Anvil's test account #0)
-PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-
-# Debug output directory
-DEBUG_DIR="debug"
-```
 
 ## Usage
 
-### 1. Run Anvil node with tracing enabled
-
-```bash
-# Run Anvil with step tracing enabled (required for debugging)
-$ anvil --fork-url https://reth-ethereum.ithaca.xyz/rpc --optimism --steps-tracing
-```
-
-**Important**: The `--steps-tracing` flag is required for walnut-cli to get execution traces.
-
-### 2. Deploy a Contract
-
-Deploy a Solidity contract with debug information:
-
-```bash
-# Deploy TestContract example
-./scripts/deploy-contract.sh TestContract examples/TestContract.sol
-
-# Deploy your own contract
-./scripts/deploy-contract.sh Counter src/Counter.sol
-
-# # Deploy Contract with Constructor Arguments
-./scripts/deploy-contract.sh Ballot examples/Ballot.sol \                                                                                     
-    '[0x416c696365000000000000000000000000000000000000000000000000000000, 0x426f620000000000000000000000000000000000000000000000000000000000, 0x436861726c696500000000000000000000000000000000000000000000000000]'
-
-# With custom settings
-./scripts/deploy-contract.sh \
-  --solc=/path/to/custom/solc \
-  --rpc=http://localhost:8545 \
-  --debug-dir=my-debug \
-  Counter src/Counter.sol
-```
-
-This will:
-- Compile with ETHDebug support: `solc --via-ir --debug-info ethdebug --ethdebug`
-- Deploy to the blockchain
-- Save ETHDebug JSON files to `./debug/`
-- Generate deployment info
-
-### 2. Interact with Contract
-
-Execute transactions and get transaction hashes for debugging:
-
-```bash
-# Get current value
-./scripts/interact-contract.sh get
-
-# Set a value
-./scripts/interact-contract.sh set 42
-
-# Increment
-./scripts/interact-contract.sh inc 5
-
-# Call arbitrary function
-./scripts/interact-contract.sh call "myFunction(uint256,address)" 100 0x1234...
-```
-Or:
-
-```
-../scripts/interact-contract.sh send "complexCalculation(uint256,uint256)" 4 5
-```
-
-Each transaction returns a hash that can be debugged.
-
-### 3. Debug a Transaction
+### 1. Debug a Transaction
 
 ```bash
 # Debug with ETHDebug information
-walnut-cli trace 0x123... --ethdebug-dir ./debug
+soldb trace 0x123... --ethdebug-dir ./debug
 
-# Or if walnut.config.yaml is configured correctly
-walnut-cli trace 0x123...
+# Set up RPC
+soldb trace 0x123... --rpc http://localhost:8545
 
 # Show raw execution trace
-walnut-cli trace 0x123... --raw
+soldb trace 0x123... --raw
 
 # Output in JSON format
-walnut-cli trace 0x123... --ethdebug-dir ./debug --json
+soldb trace 0x123... --ethdebug-dir ./debug --json
 ```
 
 This shows a high-level function call trace with gas usage and source mappings.
 
-### 4. Debug Multi-Contract Transactions
+### 2. Debug Multi-Contract Transactions
 
-Walnut-cli supports debugging transactions that involve multiple contracts, providing seamless source-level debugging across contract boundaries.
+SolDB supports debugging transactions that involve multiple contracts, providing seamless source-level debugging across contract boundaries.
 
 #### Loading Multiple Contracts
 
 **Option 1: Multiple debug directories**
 ```bash
 # Auto-detect contracts from deployment.json files
-walnut-cli trace 0x123... \
+soldb trace 0x123... \
     --ethdebug-dir ./debug_controller \
     --ethdebug-dir ./debug_counter
 
 # Specify address:path mapping
-walnut-cli trace 0x123... \
+soldb trace 0x123... \
     --ethdebug-dir 0x44c4...9d64:./debug_controller \
     --ethdebug-dir 0x82e8...43fb:./debug_counter
 
 # Or specify address:contract_name:path mapping
-walnut-cli trace 0x123... \
+soldb trace 0x123... \
     --ethdebug-dir 0x44c4...9d64:Controller:./debug_controller \
     --ethdebug-dir 0x82e8...43fb:Counter:./debug_counter
 ```
@@ -260,12 +122,12 @@ cat > contracts.json << EOF
 EOF
 
 # Use the mapping file
-walnut-cli trace 0x123... --contracts contracts.json
+soldb trace 0x123... --contracts contracts.json
 ```
 
 **Option 3: Enable multi-contract mode**
 ```bash
-walnut-cli trace 0x123... --multi-contract --ethdebug-dir ./debug/
+soldb trace 0x123... --multi-contract --ethdebug-dir ./debug/
 ```
 
 #### Multi-Contract Output
@@ -290,20 +152,20 @@ Call Stack:
 ```
 
 
-### 5. Simulate a Transaction
+### 3. Simulate a Transaction
 
 You can simulate a contract call (without sending a real transaction) using the `simulate` command. Supports all Solidity argument types, including structs/tuples.
 
 #### Basic usage
 
 ```bash
-walnut-cli simulate <contract_address> <function_signature> [function_args ...] --from <sender_address> --ethdebug-dir <debug_dir> [--block <block_number>] [--tx-index <index>] [--rpc-url <rpc_url>]
+soldb simulate <contract_address> <function_signature> [function_args ...] --from <sender_address> --ethdebug-dir <debug_dir> [--block <block_number>] [--tx-index <index>] [--rpc-url <rpc_url>]
 ```
 
 #### Example: Simple increment function
 
 ```bash
-walnut-cli simulate \
+soldb simulate \
     0x5FbDB2315678afecb367f032d93F642f64180aa3 "increment(uint256)" 10 \
     --from 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 \
     --ethdebug-dir ./debug \
@@ -313,7 +175,7 @@ walnut-cli simulate \
 #### Example: Function with address argument
 
 ```bash
-walnut-cli simulate \
+soldb simulate \
   0xcf7ed3acca5a467e9e704c703e8d87f634fb0fc9 \
   "giveRightToVote(address)" \
   0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
@@ -324,7 +186,7 @@ walnut-cli simulate \
 #### Example: Function with struct/tuple argument
 
 ```bash
-walnut-cli simulate \
+soldb simulate \
   0x0165878a594ca255338adfa4d48449f69242eb8f \
   "submitPerson((string,uint256))" \
   '("Alice", 30)' \
@@ -335,7 +197,7 @@ walnut-cli simulate \
 #### Example: Nested struct/tuple argument
 
 ```bash
-walnut-cli simulate \
+soldb simulate \
   0x0165878a594ca255338adfa4d48449f69242eb8f \
   "submitCompany((string,(string,uint256)))" \
   '("Acme Corp", ("Bob", 42))' \
@@ -347,18 +209,16 @@ walnut-cli simulate \
 #### Example: Using raw calldata
 
 ```bash
-walnut-cli simulate --raw-data 0x785bd74f000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000941636d6520436f727000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000002a0000000000000000000000000000000000000000000000000000000000000003426f620000000000000000000000000000000000000000000000000000000000 0xD7B5004e4124d26df1b03f3541e9653E706CCC40 \
+soldb simulate --raw-data 0x785bd74f000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000941636d6520436f727000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000002a0000000000000000000000000000000000000000000000000000000000000003426f620000000000000000000000000000000000000000000000000000000000 0xD7B5004e4124d26df1b03f3541e9653E706CCC40 \
   --ethdebug-dir ./debug_example \
   --from 0x286AF310eA3303c80eBE9a66F6998B21Bd8c1c29 
 ```
 
-## Debug Information Formats
+## Debug Information Format
 
-### ETHDebug Format
+SolDB relies on the standard ETHDebug format from the Solidity compiler (requires Solidity 0.8.29+):
 
-This approach is to use the standard ethdebug format from the Solidity compiler (requires Solidity 0.8.29+):
-
-1. **Generate ethdebug information**:
+1. **Generate ETHDebug information**:
    ```bash
    # Requires solc 0.8.29 or higher
    solc --via-ir --debug-info ethdebug --ethdebug -o /tmp/ethdebug-output MyContract.sol
@@ -368,71 +228,14 @@ This approach is to use the standard ethdebug format from the Solidity compiler 
    - `MyContract_ethdebug.json` - Constructor/creation debug info
    - `MyContract_ethdebug-runtime.json` - Runtime debug info
 
-2. **Trace transactions with ethdebug**:
+2. **Trace transactions with ETHDebug**:
    ```bash
-   walnut-cli trace 0x123...abc --ethdebug-dir /tmp/ethdebug-output
+   soldb trace 0x123...abc --ethdebug-dir /tmp/ethdebug-output
    ```
+### One example of a workflow
 
-### Other formats
-
-Currently, walnut-cli supports the standard ETHDebug format. Additional formats may be added in the future.
-
-### Using walnut-cli after installation
-
-After running `pip install -e .`, you can use walnut-cli directly from anywhere:
-
-```bash
-# The commands are available globally
-walnut-cli trace 0x123...
-walnut trace 0x123...  # Short alias
-walnut-setup          # Setup wizard
-```
-
-## Debugging Workflow
-
-### Using Helper Scripts (Recommended)
-
-1. **Write your contract**:
-   ```solidity
-   // src/Counter.sol
-   contract Counter {
-       uint256 public counter;
-       
-       function setNumber(uint256 newNumber) public {
-           counter = newNumber;
-       }
-       
-       function increment(uint256 amount) public {
-           counter += amount;
-       }
-   }
-   ```
-
-2. **Deploy with debug info**:
-   ```bash
-   ./scripts/deploy-contract.sh Counter src/Counter.sol
-   
-   # Output:
-   # Transaction: 0x123...
-   # Contract deployed at: 0xabc...
-   # ETHDebug files created in: debug/
-   ```
-
-3. **Interact and get transaction hash**:
-   ```bash
-   ./scripts/interact-contract.sh set 42
-   # Returns: Transaction: 0x123...
-   ```
-
-4. **Debug the transaction**:
-   ```bash
-   walnut-cli trace 0x123... --ethdebug-dir ./debug
-   # Shows function call trace with proper function names
-   ```
-
-### Manual Workflow (Without Scripts)
-
-If you prefer to compile, deploy, and interact manually:
+There are some helper scripts in `test/` for deploying and interacting between contracts.
+But, if you prefer to compile, deploy, and interact manually:
 
 1. **Compile with ETHDebug support**:
    ```bash
@@ -474,7 +277,7 @@ If you prefer to compile, deploy, and interact manually:
 4. **Debug the transaction**:
    ```bash
    # Use the transaction hash from step 3
-   walnut-cli trace 0xYOUR_TX_HASH --ethdebug-dir ./debug
+   soldb trace 0xYOUR_TX_HASH --ethdebug-dir ./debug --rpc-url http://localhost:8545
    ```
 
 ### Reading contract state (view functions):
@@ -486,7 +289,7 @@ cast call CONTRACT_ADDRESS "counter()(uint256)" --rpc-url http://localhost:8545
 ## Example Output
 
 ```
-walnut-cli trace 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994 --ethdebug-dir debug --rpc http://localhost:8545
+soldb trace 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994 --ethdebug-dir debug --rpc http://localhost:8545
 Loading transaction 0x2832a995d3e50c85599e7aa0343e93aa77460d6069466be4b81dbc1ea21a3994...
 Loaded 1833 PC mappings from ethdebug
 Contract: TestContract
@@ -516,7 +319,7 @@ Use --raw flag to see detailed instruction trace
 
 The raw output:
 ```
-$ walnut-cli trace 0x123...abc --ethdebug-dir debug --raw
+$ soldb trace 0x123...abc --ethdebug-dir debug --raw
 
 Loaded 300 PC mappings from ethdebug
 Contract: HelloWorld
@@ -541,7 +344,7 @@ Step | PC   | Op              | Gas     | Stack
 The output of reverted transaction
 
 ```
-walnut-cli trace 0x9b0a8e0776cea556b7bb0c7946bf917ebaf5cb403ed3179e84c44c188c694db3 --ethdebug-dir debug_order --ethdebug-dir debug_payment --ethdebug-dir debug_logger --ethdebug-dir debug_shipping_manager --ethdebug-dir debug_tax_calculator --rpc http://localhost:8545
+soldb trace 0x9b0a8e0776cea556b7bb0c7946bf917ebaf5cb403ed3179e84c44c188c694db3 --ethdebug-dir debug_order --ethdebug-dir debug_payment --ethdebug-dir debug_logger --ethdebug-dir debug_shipping_manager --ethdebug-dir debug_tax_calculator --rpc http://localhost:8545
 Loading transaction 0x9b0a8e0776cea556b7bb0c7946bf917ebaf5cb403ed3179e84c44c188c694db3...
 
 Function Call Trace: 0x9b0a8e0776cea556b7bb0c7946bf917ebaf5cb403ed3179e84c44c188c694db3
@@ -569,7 +372,6 @@ Call Stack:
 Use --raw flag to see detailed instruction trace
 ```
 
-
 ## Run tests
 
 ```bash
@@ -580,11 +382,39 @@ cd test
 It expects RPC at `http://localhost:8545` (Anvil default) and uses Anvil's test account private key by default.
 Also, it uses LLVM's `lit` and `FileCheck` tools, so please install it.
 
+## Advanced Setup
+
+### Install from Source
+
+For development or contributing to SolDB:
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/yourusername/soldb.git
+   cd soldb
+   ```
+
+2. **Set up a Python virtual environment:**
+   ```bash
+   python3 -m venv MyEnv
+   source MyEnv/bin/activate
+   ```
+
+3. **Install Python dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Install SolDB in editable mode:**
+   ```bash
+   pip install -e .
+   ```
+
 ## License
 
-Walnut is licensed under the Business Source License 1.1 (BSL). You may use, self-host, and modify Walnut for non-commercial purposes.
+SolDB is licensed under the Business Source License 1.1 (BSL). You may use, self-host, and modify SolDB for non-commercial purposes.
 
-To use Walnut in a commercial product or service (e.g. as a SaaS offering), you must obtain a commercial license.
+To use SolDB in a commercial product or service (e.g. as a SaaS offering), you must obtain a commercial license.
 
 📄 [Full license text](./LICENSE.md)  
 📬 Contact: hi@walnut.dev

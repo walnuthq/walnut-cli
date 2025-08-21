@@ -6,16 +6,9 @@ set -e
 
 # Get script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-WALNUT_DIR="$(dirname "$SCRIPT_DIR")"
+SOLDB_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Load configuration if exists
-if [ -f "$WALNUT_DIR/walnut.config.local" ]; then
-    source "$WALNUT_DIR/walnut.config.local"
-elif [ -f "$WALNUT_DIR/walnut.config" ]; then
-    source "$WALNUT_DIR/walnut.config"
-fi
-
-# Default configuration
+# Default configuration - uses environment variables or defaults
 RPC_URL="${RPC_URL:-http://localhost:8545}"
 PRIVATE_KEY="${PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}"
 DEBUG_DIR="${DEBUG_DIR:-debug}"
@@ -340,32 +333,7 @@ cat > "$DEBUG_DIR/deployment.json" <<EOF
 }
 EOF
 
-# Create walnut.config.yaml if it doesn't exist
-WALNUT_CONFIG="$WALNUT_DIR/walnut.config.yaml"
-if [ ! -f "$WALNUT_CONFIG" ]; then
-    echo -e "\n${BLUE}Creating walnut.config.yaml...${NC}"
-    cat > "$WALNUT_CONFIG" <<EOF
-# Walnut CLI Configuration
-debug:
-  ethdebug:
-    enabled: true
-    path: "$DEBUG_DIR"
-    fallback_to_heuristics: true
-    compile_options:
-      via_ir: true
-      optimizer: true
-      optimizer_runs: 200
-
-build_dir: "build"
-rpc_url: "$RPC_URL"
-EOF
-    echo -e "${GREEN}✓ Created walnut.config.yaml${NC}"
-fi
-
 echo -e "\n${GREEN}Deployment complete!${NC}"
 echo -e "\n${BLUE}ETHDebug files location:${NC} $DEBUG_DIR"
 echo -e "\n${BLUE}To trace with ETHDebug:${NC}"
-echo -e "  $WALNUT_DIR/walnut-cli.py $TX_HASH --ethdebug-dir $DEBUG_DIR"
-echo -e "\n${BLUE}Or simply:${NC}"
-echo -e "  $WALNUT_DIR/walnut-cli.py $TX_HASH"
-echo -e "  (if walnut.config.yaml is configured correctly)"
+echo -e "  soldb trace $TX_HASH --ethdebug-dir $DEBUG_DIR --rpc $RPC_URL"
