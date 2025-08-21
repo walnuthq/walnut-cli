@@ -582,9 +582,9 @@ Also, it uses LLVM's `lit` and `FileCheck` tools, so please install it.
 
 ## License
 
-SolDB is licensed under the Business Source License 1.1 (BSL). You may use, self-host, and modify SolDB for non-commercial purposes.
+## License
 
-To use SolDB in a commercial product or service (e.g. as a SaaS offering), you must obtain a commercial license.
+SolDB is licensed under the GNU General Public License v3.0 (GPL-3.0), the same license used by Solidity and other Ethereum Foundation projects.
 
 📄 [Full license text](./LICENSE.md)  
 📬 Contact: hi@walnut.dev
