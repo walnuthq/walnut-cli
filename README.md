@@ -303,12 +303,29 @@ Use --raw flag to see detailed instruction trace
 
 ## Run tests
 
+### Prerequisites
+
+Tests expect RPC at `http://localhost:8545` (Anvil default) and use Anvil's test account private key. Also, it uses LLVM's `lit` and `FileCheck` tools, so before running tests, you need to install LLVM tools:
+
+```bash
+# macOS
+brew install llvm
+
+# Ubuntu
+sudo apt-get install llvm-dev
+```
+
+### Running tests
+
 ```bash
 cd test
 ./run-tests.sh SOLC_PATH=/path/to/solc
 ```
 
-Tests expect RPC at `http://localhost:8545` (Anvil default) and use Anvil's test account private key. Also, it uses LLVM's `lit` and `FileCheck` tools, so please install it.
+**NOTE**: Make sure Anvil is running with tracing enabled before running tests:
+```bash
+anvil --steps-tracing
+```
 
 ## Advanced Setup
 

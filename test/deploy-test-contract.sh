@@ -33,7 +33,7 @@ rm -rf "${DEBUG_DIR}"
 
 # Deploy the contract
 echo -e "${YELLOW}Running deployment script...${NC}"
-"${PROJECT_DIR}/scripts/deploy-contract.sh" \
+"${PROJECT_DIR}/test/deploy-contract.sh" \
     --solc="${SOLC_PATH}" \
     --rpc="${RPC_URL}" \
     --private-key="${PRIVATE_KEY}" \
