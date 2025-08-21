@@ -539,7 +539,7 @@ class TransactionTracer:
        
         # Call debug_traceCall
         try:
-            trace_config = {"disableStorage": False, "disableMemory": False}
+            trace_config = {"disableStorage": False, "disableMemory": False, "enableMemory": True}
             if tx_index is not None:
                 trace_config["txIndex"] = tx_index
             # Block param
@@ -555,7 +555,7 @@ class TransactionTracer:
         except Exception as e:
             print(f"debug_traceCall not available: {e}")
             raise
-
+        
         # Parse trace steps (reuse logic from trace_transaction)
         steps = []
         for i, step in enumerate(trace_result.get('structLogs', [])):
@@ -606,7 +606,6 @@ class TransactionTracer:
             success=not is_failed,
             error=error_msg
         )
-
     def _basic_trace(self, tx_hash: str) -> Dict[str, Any]:
         """Basic trace using eth_call if debug namespace not available."""
         tx = self.w3.eth.get_transaction(tx_hash)

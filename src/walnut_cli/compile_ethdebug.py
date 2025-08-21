@@ -5,6 +5,7 @@ Can be used standalone or integrated into the walnut-cli workflow.
 """
 
 import argparse
+from logging import info
 import sys
 import json
 from pathlib import Path
@@ -204,7 +205,12 @@ def compile_ethdebug_run(
 
     if verify_version:
         version_info = config.verify_solc_version()
-        return {"mode": "verify_version", **version_info}
+        res = {"mode": "verify_version", **version_info}
+        if not res.get("supported"):
+            raise CompilationError(version_info.get("error", "Unsupported solc version"))
+        print(info(f"solc {version_info['version']} OK (ETHDebug supported)"))
+            
+        
 
     if save_config:
         config.save_to_walnut_config()

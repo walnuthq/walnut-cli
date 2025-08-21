@@ -46,7 +46,7 @@ class EVMDebugger(cmd.Cmd):
             'hide_parameters': False,  # Hide function parameters
             'hide_temporaries': True,  # Hide compiler-generated temporary variables
         }
-        
+
         # Load contract and debug info
         self.contract_address = contract_address
         self.constructor_args = constructor_args or []
@@ -65,12 +65,18 @@ class EVMDebugger(cmd.Cmd):
         # Load ETHDebug info if available
         if ethdebug_dir:
             self.source_map = self.tracer.load_ethdebug_info(ethdebug_dir)
-            
+                
             # Load ABI from ethdebug directory
             if self.tracer.ethdebug_info:
-                if os.path.exists(self.abi_path):
+                if self.abi_path is not None and os.path.exists(self.abi_path):
                     self.tracer.load_abi(self.abi_path)
-
+                else:
+                    # Fallback to any ABI file in the directory
+                    for file in os.listdir(ethdebug_dir):
+                        if file.endswith('.abi'):
+                            self.abi_path = os.path.join(ethdebug_dir, file)
+                            self.tracer.load_abi(self.abi_path)
+        
         elif debug_file:
             self.source_map = self.tracer.load_debug_info(debug_file)
             
@@ -99,7 +105,7 @@ class EVMDebugger(cmd.Cmd):
             
         # Set initial intro message
         self._set_intro_message()
-    
+
     def _load_source_files(self):
         """Load all source files referenced in debug info."""
         if self.tracer.ethdebug_info:
@@ -116,9 +122,15 @@ class EVMDebugger(cmd.Cmd):
                 with open(source_file, 'r') as f:
                     self.source_lines[source_file] = f.readlines()
                 print(f"Loaded source: {info(source_file)}")
-    
+
     def _set_intro_message(self):
         """Set the intro message based on command used."""
+        if self.command_debug:
+            self.intro = f"""
+{bold('Walnut EVM Debugger')} - Solidity Debugger
+Type {info('help')} for commands. Use {info('next')}/{info('nexti')} to step, {info('continue')} to run, {info('where')} to see call stack.
+"""
+            return
         if self.current_trace:
             # Trace is already loaded
             self.intro = f"""
@@ -127,21 +139,14 @@ Trace loaded and ready for debugging. Type {info('help')} for commands.
 Use {info('next')}/{info('nexti')} to step, {info('continue')} to run, {info('where')} to see call stack.
     """
         else:
-            # No trace loaded, need to load one
-            if self.command_debug:
-                self.intro = f"""
-{bold('Walnut EVM Debugger')} - Solidity Debugger
-Type {info('help')} for commands. Use {info('run')} to debug a transaction."""
-            else:                
-                self.intro = f"""{bold('Walnut EVM Debugger')} - Solidity Debugger
+            # No trace loaded, need to load one               
+            self.intro = f"""{bold('Walnut EVM Debugger')} - Solidity Debugger
 Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific transaction for debugging.
 """
 
     def do_run(self, tx_hash: str):
         """Run/load a transaction for debugging. Usage: run <tx_hash>"""
-        if self.command_debug:
-            self._do_interactive()
-            return
+        
         if not tx_hash:
             print("Usage: run <tx_hash>")
             return
@@ -206,9 +211,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific
             
             # Analyze function calls
             self.function_trace = self.tracer.analyze_function_calls(self.current_trace)
-            
             print(f"{success('Simulation complete.')} {highlight(str(len(self.current_trace.steps)))} steps.")
-            print(f"Type {info('continue')} to run, {info('next')} to step by source line, {info('nexti')} to step by instruction")
             
             # Start at the first function call after dispatcher
             if len(self.function_trace) > 1:
@@ -217,8 +220,6 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific
             else:
                 # If no function dispatcher, start at beginning but avoid end-of-execution
                 self.current_step = 0
-            
-            self._show_current_state()
             
         except Exception as e:
             print(f"{error('Error in simulation:')} {e}")
@@ -424,7 +425,15 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific
             else:
                 print("No breakpoints set.")
             return
-        
+
+        if self.function_trace:
+            for func in self.function_trace:
+                if func.name == arg:
+                    entry_pc = self.current_trace.steps[func.entry_step].pc
+                    self.breakpoints.add(entry_pc)
+                    print(f"Breakpoint set at function '{func.name}' (PC {entry_pc})")
+                    return
+
         # Parse breakpoint
         if ':' in arg:
             # File:line format
@@ -445,6 +454,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific
                     print(f"No PC found for {filename}:{line_num}")
             except ValueError:
                 print("Invalid line number")
+
         else:
             # PC format
             try:
@@ -1453,7 +1463,6 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific
             
             print(f"\n{dim('Use')} {info('help <command>')} {dim('for detailed help on a specific command.')}")
             print(dim("=" * 60) + "\n")
-
 
 def main():
     """Main entry point for the EVM REPL debugger."""

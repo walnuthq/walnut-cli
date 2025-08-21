@@ -99,7 +99,6 @@ class AutoDeployDebugger:
         if self.fork_url:
             self._launch_fork()
             return
-        # No reuse and no fork_url: keep self.rpc_url as provided (e.g., local node)
 
     def _launch_fork(self):
         # Reuse existing local fork if asked and reachable
@@ -225,17 +224,6 @@ class AutoDeployDebugger:
 
     def compile_contract(self):
         print(info("\n--- Verifying solc & Compiling ---"))
-        
-        version_info = compile_ethdebug_run(
-            contract_file=str(self.contract_path),
-            solc_path=self.solc_path,
-            debug_output_dir=str(self.debug_output_dir),
-            production_dir=str(self.production_dir),
-            verify_version=True
-        )
-        if not version_info.get("supported"):
-            raise CompilationError(version_info.get("error", "Unsupported solc version"))
-        print(info(f"solc {version_info['version']} OK (ETHDebug supported)"))
     
         try:
             self._compile_result = compile_ethdebug_run(
@@ -243,8 +231,14 @@ class AutoDeployDebugger:
                 solc_path=self.solc_path,
                 debug_output_dir=str(self.debug_output_dir),
                 production_dir=str(self.production_dir),
-                dual=self.dual_compile
+                dual=self.dual_compile,
+                verify_version=self.verify_version
             )
+
+            if self.verify_version:
+                if not self._compile_result.get("supported"):
+                    raise CompilationError(self._compile_result.get("error", "Unsupported solc version"))
+                print(info(f"solc {self._compile_result['version']} OK (ETHDebug supported)"))
         except Exception as e:
             raise CompilationError(f"Compilation error: {e}") from e
 

@@ -16,7 +16,7 @@ from .abi_utils import match_abi_types, match_single_type, parse_signature, pars
 from .multi_contract_ethdebug_parser import MultiContractETHDebugParser
 from .json_serializer import TraceSerializer
 from .colors import error
-from .debug_session import AutoDeployDebugger
+from .auto_deploy import AutoDeployDebugger
 
 
 def find_debug_file(contract_addr: str) -> str:
@@ -508,6 +508,7 @@ def debug_command(args):
     """Execute the debug command."""
     contract_address = None
     ethdebug_dir = None
+    abi_path = None
     session = None
     if args.contract_file:
         try:
@@ -564,8 +565,11 @@ def debug_command(args):
     if not args.no_snapshot:
         debugger.tracer.snapshot_state()
 
+    debugger._do_interactive()
+
     try:
         debugger.cmdloop()
+        
         if args.fork_url and session and not args.keep_fork:
             session.cleanup()
     except KeyboardInterrupt:
