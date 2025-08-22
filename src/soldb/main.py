@@ -16,6 +16,7 @@ from .abi_utils import match_abi_types, match_single_type, parse_signature, pars
 from .multi_contract_ethdebug_parser import MultiContractETHDebugParser
 from .json_serializer import TraceSerializer
 from .colors import error
+from .auto_deploy import AutoDeployDebugger
 
 
 def find_debug_file(contract_addr: str) -> str:
@@ -237,10 +238,17 @@ def trace_command(args):
         debugger.current_step = 0
         debugger.function_trace = function_calls
         
-        # Start at first function after dispatcher
+        # Set dynamic intro message based on pre-loaded trace
+        debugger._set_intro_message()
+        
+        # Start at first meaningful function, but be conservative
         if len(function_calls) > 1:
-            debugger.current_step = function_calls[1].entry_step
-            debugger.current_function = function_calls[1]
+            # Check if the first function after dispatcher is reasonable
+            first_func = function_calls[1]
+            if first_func.entry_step < len(trace.steps) - 10:  # Leave some room at the end
+                debugger.current_step = first_func.entry_step
+                debugger.current_function = first_func
+            # Otherwise, stay at step 0
         
         # Start REPL
         try:
@@ -506,6 +514,85 @@ def simulate_command(args):
         tracer.print_function_trace(trace, function_calls)
     return 0
 
+def debug_command(args):
+    """Execute the debug command."""
+    contract_address = None
+    ethdebug_dir = None
+    abi_path = None
+    session = None
+    if args.contract_file:
+        try:
+            session = AutoDeployDebugger(
+                contract_file=args.contract_file,
+                rpc_url=args.rpc,
+                constructor_args=getattr(args, 'constructor_args', []),
+                solc_path=args.solc_path,
+                dual_compile=args.dual_compile,
+                keep_build=args.keep_build,
+                output_dir=args.output_dir,
+                production_dir=args.production_dir,
+                json_output=args.json,
+                save_config=args.save_config,
+                verify_version=args.verify_version,
+                use_cache=not args.no_cache,
+                cache_dir=args.cache_dir,
+                fork_url=args.fork_url,
+                fork_block=args.fork_block,
+                auto_snapshot=not args.no_snapshot,
+                keep_fork=args.keep_fork,
+                reuse_fork=args.reuse_fork,
+                fork_port=args.fork_port,
+            )
+            contract_address = session.contract_address
+            ethdebug_dir = str(session.debug_dir)
+            abi_path = str(session.abi_path)
+            
+        except Exception as e:
+            print(error(f"Debug session failed: {e}"))
+            return 1
+    elif args.contract_address:
+        if not args.ethdebug_dir:
+            print(error("Error: --ethdebug-dir is required when using --contract-address."))
+            return 1
+        if args.constructor_args:
+            print(error("Warning: --constructor-args ignored when using --contract-address (contract is already deployed)."))
+        contract_address = args.contract_address
+        ethdebug_dir = args.ethdebug_dir
+    else:
+        print(error("Either --contract-file or --contract-address required"))
+        return 1
+            
+    print("\nStarting debugger...")
+    debugger = EVMDebugger(
+        contract_address=str(contract_address),
+        rpc_url=(session.rpc_url if session else args.rpc),
+        ethdebug_dir=ethdebug_dir,
+        function_name=getattr(args, 'function', None),
+        function_args=getattr(args, 'args', []),
+        command_debug=True,
+        abi_path=abi_path
+    )
+
+    # Baseline snapshot (unless disabled)
+    if not args.no_snapshot:
+        debugger.tracer.snapshot_state()
+
+    debugger._do_interactive()
+
+    try:
+        debugger.cmdloop()
+        
+        if args.fork_url and session and not args.keep_fork:
+            session.cleanup()
+    except KeyboardInterrupt:
+        print("\nInterrupted")
+        if args.fork_url and session and not args.keep_fork:
+            print("Stopping anvil fork...")
+            session.cleanup()
+        return 1
+    
+    return 0
+
 def main():
     parser = argparse.ArgumentParser(description='SolDB - Ethereum transaction analysis tool')
     parser.add_argument('--version', '-v', action='version', version='%(prog)s 0.1.0')
@@ -513,6 +600,35 @@ def main():
     # Create subparsers for different commands
     subparsers = parser.add_subparsers(dest='command', help='Commands')
     subparsers.required = True
+    
+    # Create the 'debug' subcommand for standalone interactive debugging
+    debug_parser = subparsers.add_parser('debug', help='Compile, deploy, and debug a contract, or attach to an existing one.')
+    debug_parser.add_argument('--rpc', '-r', default='http://localhost:8545', help='RPC URL')
+
+    # Use a mutually exclusive group to ensure user provides either a file to deploy or an address to attach to
+    contract_group = debug_parser.add_mutually_exclusive_group(required=True)
+    contract_group.add_argument('--contract-file', '-c', help='Path to Solidity source file to auto-compile and deploy.')
+    contract_group.add_argument('--contract-address', help='Address of an already deployed contract to attach to.')
+    debug_parser.add_argument('--ethdebug-dir', '-e', help='ETHDebug directory (required if using --contract-address)')
+    debug_parser.add_argument('--function', '-f', help='Function to simulate on start.')
+    debug_parser.add_argument('--args', nargs='*', default=[], help='A list of arguments for the function.')
+    debug_parser.add_argument('--constructor-args', nargs='*', default=[], help='Constructor arguments (only used with --contract-file)')
+    debug_parser.add_argument('--solc-path', '-solc', default='solc', help='Path to solc binary (default: solc)')
+    debug_parser.add_argument('--dual-compile', action='store_true', help='Create both optimized production and debug builds')
+    debug_parser.add_argument('--keep-build', action='store_true', help='Keep build directory after compilation (default: False)')
+    debug_parser.add_argument('--output-dir', '-o', default='./build/debug/ethdebug', help='Output directory for ETHDebug files (default: ./build/debug/ethdebug)')
+    debug_parser.add_argument('--production-dir', default='./build/contracts', help='Production directory for compiled contracts (default: ./build/contracts)')
+    debug_parser.add_argument('--json', action='store_true', help='Output results as JSON')
+    debug_parser.add_argument('--save-config', action='store_true', help='Save configuration to walnut.config.yaml')
+    debug_parser.add_argument('--verify-version', action='store_true', help='Verify solc version supports ETHDebug and exit')
+    debug_parser.add_argument('--no-cache', action='store_true', default=False, help='Enable deployment cache')
+    debug_parser.add_argument('--cache-dir', default='.walnut_cache', help='Cache directory')
+    debug_parser.add_argument('--fork-url', help='Upstream RPC URL to fork (launch anvil)')
+    debug_parser.add_argument('--fork-block', type=int, help='Specific block number to fork')
+    debug_parser.add_argument('--fork-port', type=int, default=8545, help='Local fork port (default: 8545)')
+    debug_parser.add_argument('--keep-fork', action='store_true', help='Do not terminate the forked node on exit')
+    debug_parser.add_argument('--reuse-fork', action='store_true', help='Reuse an existing local fork if available on --fork-port')
+    debug_parser.add_argument('--no-snapshot', action='store_true',default=False, help='Disable automatic initial snapshot')
     
     # Create the 'trace' subcommand
     trace_parser = subparsers.add_parser('trace', help='Trace and debug an Ethereum transaction')
@@ -546,13 +662,14 @@ def main():
     args = parser.parse_args()
     
     # Handle commands
-    if args.command == 'trace':
+    if args.command == 'debug':
+        return debug_command(args)
+    elif args.command == 'trace':
         return trace_command(args)
-    if args.command == 'simulate':
+    elif args.command == 'simulate':
         return simulate_command(args)
         
     return 0
-
 
 if __name__ == '__main__':
     sys.exit(main())

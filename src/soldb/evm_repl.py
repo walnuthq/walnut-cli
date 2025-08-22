@@ -22,8 +22,9 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
     prompt = f'{cyan("(soldb)")} '
     
     def __init__(self, contract_address: str = None, debug_file: str = None, 
-                 rpc_url: str = "http://localhost:8545", ethdebug_dir: str = None,
-                 multi_contract_parser = None):
+                 rpc_url: str = "http://localhost:8545", ethdebug_dir: str = None, constructor_args: List[str] = [],
+                 multi_contract_parser = None,function_name: str = None, function_args: List[str] = [],
+                 command_debug: bool = False, abi_path: str = None):
         super().__init__()
         
         self.tracer = TransactionTracer(rpc_url)
@@ -49,9 +50,10 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             'hide_parameters': False,  # Hide function parameters
             'hide_temporaries': True,  # Hide compiler-generated temporary variables
         }
-        
+
         # Load contract and debug info
         self.contract_address = contract_address
+        self.constructor_args = constructor_args or []
         self.debug_file = debug_file
         self.ethdebug_dir = ethdebug_dir
         self.source_map = {}
@@ -59,16 +61,26 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
         self.dwarf_info = None
         self.source_lines = {}  # filename -> lines
         self.current_function = None  # Current function context
-        
+        self.function_name = function_name
+        self.function_args = function_args
+        self.command_debug = command_debug
+        self.abi_path = abi_path
+
         # Load ETHDebug info if available
         if ethdebug_dir:
             self.source_map = self.tracer.load_ethdebug_info(ethdebug_dir)
+                
             # Load ABI from ethdebug directory
             if self.tracer.ethdebug_info:
-                abi_path = os.path.join(ethdebug_dir, f"{self.tracer.ethdebug_info.contract_name}.abi")
-                if os.path.exists(abi_path):
-                    self.tracer.load_abi(abi_path)
-            
+                if self.abi_path is not None and os.path.exists(self.abi_path):
+                    self.tracer.load_abi(self.abi_path)
+                else:
+                    # Fallback to any ABI file in the directory
+                    for file in os.listdir(ethdebug_dir):
+                        if file.endswith('.abi'):
+                            self.abi_path = os.path.join(ethdebug_dir, file)
+                            self.tracer.load_abi(self.abi_path)
+        
         elif debug_file:
             self.source_map = self.tracer.load_debug_info(debug_file)
             
@@ -94,7 +106,10 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
         # Only print debug mappings message if we loaded them here (not passed from main)
         if self.source_map and not ethdebug_dir:
             print(f"Loaded {success(str(len(self.source_map)))} debug mappings")
-    
+            
+        # Set initial intro message
+        self._set_intro_message()
+
     def _load_source_files(self):
         """Load all source files referenced in debug info."""
         if self.tracer.ethdebug_info:
@@ -111,9 +126,31 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
                 with open(source_file, 'r') as f:
                     self.source_lines[source_file] = f.readlines()
                 print(f"Loaded source: {info(source_file)}")
-    
+
+    def _set_intro_message(self):
+        """Set the intro message based on command used."""
+        if self.command_debug:
+            self.intro = f"""
+{bold('SolDB EVM Debugger')} - Solidity Debugger
+Type {info('help')} for commands. Use {info('next')}/{info('nexti')} to step, {info('continue')} to run, {info('where')} to see call stack.
+"""
+            return
+        if self.current_trace:
+            # Trace is already loaded
+            self.intro = f"""
+{bold('SoldDB EVM Debugger')} - Solidity Debugger
+Trace loaded and ready for debugging. Type {info('help')} for commands.
+Use {info('next')}/{info('nexti')} to step, {info('continue')} to run, {info('where')} to see call stack.
+    """
+        else:
+            # No trace loaded, need to load one               
+            self.intro = f"""{bold('SoldDB EVM Debugger')} - Solidity Debugger
+Type {info('help')} for commands. Use {info('run <tx_hash>')} to load a specific transaction for debugging.
+"""
+
     def do_run(self, tx_hash: str):
         """Run/load a transaction for debugging. Usage: run <tx_hash>"""
+        
         if not tx_hash:
             print("Usage: run <tx_hash>")
             return
@@ -137,6 +174,133 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             self._show_current_state()
         except Exception as e:
             print(f"{error('Error loading transaction:')} {e}")
+    
+    def _do_interactive(self):
+        """Simulate a function call for debugging. Usage: interactive <function_name> [args...]"""
+ 
+        if not self.contract_address:
+            print(f"{warning('Warning:')} No contract address set. Using default for simulation.")
+            return
+        else:
+            contract_addr = self.contract_address
+        
+        try:
+            # Parse function call
+            function_name = str(self.function_name)
+            function_args = self.function_args
+            
+
+            print(f"Simulating {info(function_name)}({', '.join(function_args)})...")
+            
+            # Encode function call
+            calldata = self._encode_function_call(function_name, function_args)
+            if not calldata:
+                print(f"{error('Failed to encode function call.')} Check function name and arguments.")
+                return
+            
+            # Create simulation using tracer
+            from_addr = "0x" + "0" * 40  # Default sender address
+            self.current_trace = self.tracer.simulate_call_trace(
+                to=contract_addr,
+                from_=from_addr, 
+                calldata=calldata,
+                block=None  # Use latest block
+            )
+            
+            if not self.current_trace:
+                print(f"{error('Simulation failed.')} Check function name and arguments.")
+                return
+                
+            self.current_step = 0
+            
+            # Analyze function calls
+            self.function_trace = self.tracer.analyze_function_calls(self.current_trace)
+            print(f"{success('Simulation complete.')} {highlight(str(len(self.current_trace.steps)))} steps.")
+            
+            # Start at the first function call after dispatcher
+            if len(self.function_trace) > 1:
+                self.current_step = self.function_trace[1].entry_step
+                self.current_function = self.function_trace[1]
+            else:
+                # If no function dispatcher, start at beginning but avoid end-of-execution
+                self.current_step = 0
+            
+        except Exception as e:
+            print(f"{error('Error in simulation:')} {e}")
+            import traceback
+            print(f"{dim('Details:')} {traceback.format_exc()}")
+    
+    def _encode_function_call(self, function_name: str, args: list) -> Optional[str]:
+        """Encode a function call into calldata."""
+        if not hasattr(self.tracer, 'function_abis_by_name'):
+            print(f"{error('No ABI information available.')}")
+            return None
+
+        function_name = function_name.split('(')[0]  # Remove any parameter list
+        
+        if function_name not in self.tracer.function_abis_by_name:
+            print(f"{error('Function not found:')} {function_name}")
+            if self.tracer.function_abis_by_name:
+                available = list(self.tracer.function_abis_by_name.keys())
+                print(f"Available functions: {', '.join(available)}")
+            return None
+        
+        func_abi = self.tracer.function_abis_by_name[function_name]
+        inputs = func_abi.get('inputs', [])
+        
+        if len(args) != len(inputs):
+            param_str = ', '.join([f"{inp['type']} {inp['name']}" for inp in inputs])
+            print(f"{error('Argument count mismatch.')} Expected: {function_name}({param_str})")
+            return None
+        
+        try:
+            # Import web3 contract encoder
+            from web3 import Web3
+            
+            # Convert string arguments to appropriate types
+            converted_args = []
+            for i, arg in enumerate(args):
+                param_type = inputs[i]['type']
+                converted_arg = self._convert_argument(arg, param_type)
+                converted_args.append(converted_arg)
+            
+            # Create a dummy contract to encode the function call
+            w3 = Web3()
+            contract = w3.eth.contract(abi=[func_abi])
+            
+            # Get the function and encode the call
+            func = getattr(contract.functions, function_name)
+            encoded = func(*converted_args).build_transaction({'to': '0x' + '0' * 40})
+            
+            return encoded['data']
+            
+        except Exception as e:
+            print(f"{error('Error encoding function call:')} {e}")
+            return None
+    
+    def _convert_argument(self, arg: str, param_type: str):
+        """Convert string argument to appropriate type for ABI encoding."""
+        if param_type.startswith('uint') or param_type.startswith('int'):
+            return int(arg)
+        elif param_type == 'bool':
+            return arg.lower() in ('true', '1', 'yes')
+        elif param_type == 'address':
+            if not arg.startswith('0x'):
+                arg = '0x' + arg
+            return arg
+        elif param_type == 'string':
+            return arg
+        elif param_type.startswith('bytes'):
+            if not arg.startswith('0x'):
+                arg = '0x' + arg
+            return arg
+        else:
+            # For complex types, try to parse as JSON or return as string
+            try:
+                import json
+                return json.loads(arg)
+            except:
+                return arg
     
     def do_nexti(self, arg):
         """Step to next instruction (instruction-level). Aliases: ni, stepi, si"""
@@ -265,7 +429,15 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             else:
                 print("No breakpoints set.")
             return
-        
+
+        if self.function_trace:
+            for func in self.function_trace:
+                if func.name == arg:
+                    entry_pc = self.current_trace.steps[func.entry_step].pc
+                    self.breakpoints.add(entry_pc)
+                    print(f"Breakpoint set at function '{func.name}' (PC {entry_pc})")
+                    return
+
         # Parse breakpoint
         if ':' in arg:
             # File:line format
@@ -286,6 +458,7 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
                     print(f"No PC found for {filename}:{line_num}")
             except ValueError:
                 print("Invalid line number")
+
         else:
             # PC format
             try:
@@ -1215,6 +1388,23 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
         
         return " ".join(items)
     
+    def cmdloop(self, intro=None):
+        """Override cmdloop to show current state after intro but before first prompt."""
+        if self.command_debug:
+            # Call parent cmdloop with intro
+            if intro is not None:
+                self.intro = intro
+            # Print intro if it exists
+            if self.intro:
+                self.stdout.write(str(self.intro)+"\n")
+            # Show current state after intro but before first prompt
+            if self.current_trace:
+                self._show_current_state()
+            # Start the command loop without intro (already printed)
+            super().cmdloop(intro="")
+        else:
+            super().cmdloop(intro=self.intro)
+
     def emptyline(self):
         """Handle empty line (don't repeat last command)"""
         pass
@@ -1223,7 +1413,24 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
         """Handle unknown commands."""
         print(f"{error('Unknown command:')} '{line}'")
         print(f"Type {info('help')} to see available commands.")
-    
+
+    def do_snapshot(self, _):
+        """Create an EVM snapshot (returns id)."""
+        if not getattr(self, "tracer", None) or not hasattr(self.tracer, "snapshot_state"):
+            print("Snapshot not available.")
+            return
+        sid = self.tracer.snapshot_state()
+        print(f"Snapshot: {sid}" if sid else "Snapshot failed.")
+
+    def do_revert(self, arg):
+        """Revert to a snapshot. Usage: revert [snapshot_id] (omit to revert to baseline)"""
+        if not getattr(self, "tracer", None) or not hasattr(self.tracer, "revert_state"):
+            print("Revert not available.")
+            return
+        target = arg.strip() or None
+        ok = self.tracer.revert_state(target)
+        print("Reverted." if ok else "Revert failed.")
+
     def do_help(self, arg):
         """Show help information."""
         if arg:
@@ -1277,7 +1484,6 @@ Type {info('help')} for commands. Use {info('run <tx_hash>')} to start debugging
             
             print(f"\n{dim('Use')} {info('help <command>')} {dim('for detailed help on a specific command.')}")
             print(dim("=" * 60) + "\n")
-
 
 def main():
     """Main entry point for the EVM REPL debugger."""

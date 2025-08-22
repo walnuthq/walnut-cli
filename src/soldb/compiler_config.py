@@ -35,8 +35,8 @@ class CompilerConfig:
                 "--ethdebug-runtime",
                 "--bin",
                 "--abi",
-                "--optimize",
-                "--optimize-runs", "200"
+                #"--optimize",
+                #"--optimize-runs", "200"
             ]
         
         if self.production_flags is None:
