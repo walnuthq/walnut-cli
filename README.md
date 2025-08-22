@@ -2,7 +2,7 @@
 
 # SolDB EVM Debugger
 
-A CLI debugger for EVM-based blockchains with Solidity support.
+A CLI debugger for the EVM and Solidity.
 
 ![screenshot](reverted_transaction.png)
 
